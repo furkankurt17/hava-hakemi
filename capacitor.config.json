@@ -1,0 +1,13 @@
+{
+  "appId": "com.furkankurt.havahakemi",
+  "appName": "Hava Hakemi",
+  "webDir": "www",
+  "server": {
+    "url": "https://furkankurt17.github.io/hava-hakemi/",
+    "errorPath": "offline.html",
+    "androidScheme": "https"
+  },
+  "android": {
+    "backgroundColor": "#1769cc"
+  }
+}

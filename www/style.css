@@ -1,0 +1,214 @@
+/* VOICE: sakin, net, güven veren; havanın kendisi konuşur
+   IDEA: hakem masası. Modeller oyuncu, uygulama hakem: tek karar verir, gerekçesini gösterir
+   PICTURE: tüm ekranı kaplayan canlı gökyüzü (güneş ışıltısı, bulut, yağmur, kar, yıldız, şimşek)
+   COLOUR and TYPE: gökyüzünün o anki rengi baskın, kartlar buzlu cam; Rubik
+   LAYOUT: telefonda tek sütun; geniş ekranda büyük derece solda, hakem kararı sağda */
+
+:root{
+  --sky1:#1d74d6;--sky2:#62b6f6;
+  --ink:#ffffff;--muted:rgba(255,255,255,.78);
+  --card:rgba(255,255,255,.14);--line:rgba(255,255,255,.24);
+  --accent:#ffd23f;--rain:#a8d8ff;
+  --good:#7ee2a8;--mid:#ffd166;--bad:#ff9a8a;
+  --shadow:0 10px 30px rgba(10,30,60,.18);
+}
+/* Gündüz temaları */
+body[data-sky=clear]{--sky1:#1769cc;--sky2:#5fb2f3}
+body[data-sky=partly]{--sky1:#3f7fc4;--sky2:#9cc3e6}
+body[data-sky=cloudy]{--sky1:#5d6c7e;--sky2:#9aa7b6}
+body[data-sky=rain]{--sky1:#2c3e53;--sky2:#566c82;--rain:#9fd0ff}
+body[data-sky=storm]{--sky1:#1e1a33;--sky2:#423c68;--rain:#b9b2ff;--accent:#ffe066}
+body[data-sky=fog]{--sky1:#aab4bc;--sky2:#dde2e6}
+body[data-sky=snow]{--sky1:#b9d0e4;--sky2:#eef5fb}
+/* Açık zeminli temalarda koyu yazı */
+body[data-sky=fog][data-night="0"],body[data-sky=snow][data-night="0"]{
+  --ink:#1b2a38;--muted:rgba(27,42,56,.72);
+  --card:rgba(255,255,255,.55);--line:rgba(27,42,56,.14);
+  --rain:#2f7fd1;--accent:#c98a00;
+  --good:#1d8a50;--mid:#a26f00;--bad:#c2412d;
+  --shadow:0 10px 30px rgba(40,60,80,.12);
+}
+svg.ic{filter:drop-shadow(0 1px 2px rgba(10,25,45,.22))}
+body[data-sky=fog][data-night="0"] svg.ic,body[data-sky=snow][data-night="0"] svg.ic{filter:drop-shadow(0 0 1px rgba(27,42,56,.55)) drop-shadow(0 2px 3px rgba(27,42,56,.2))}
+body[data-sky=fog][data-night="0"] .day[aria-pressed=true],body[data-sky=snow][data-night="0"] .day[aria-pressed=true]{background:rgba(27,42,56,.08)}
+body[data-sky=fog][data-night="0"] .track,body[data-sky=snow][data-night="0"] .track{background:rgba(27,42,56,.1)}
+body[data-sky=fog][data-night="0"] .track .spread,body[data-sky=snow][data-night="0"] .track .spread{background:rgba(27,42,56,.14)}
+/* Gece temaları */
+body[data-night="1"]{--card:rgba(255,255,255,.09);--line:rgba(255,255,255,.16);--accent:#ffe8a3}
+body[data-sky=clear][data-night="1"]{--sky1:#08122e;--sky2:#22305c}
+body[data-sky=partly][data-night="1"]{--sky1:#0f1931;--sky2:#2c3a5a}
+body[data-sky=cloudy][data-night="1"]{--sky1:#22282f;--sky2:#434c57}
+body[data-sky=rain][data-night="1"]{--sky1:#121c29;--sky2:#2a3a4c}
+body[data-sky=storm][data-night="1"]{--sky1:#0e0c1a;--sky2:#2a2645}
+body[data-sky=fog][data-night="1"]{--sky1:#343b41;--sky2:#596168}
+body[data-sky=snow][data-night="1"]{--sky1:#25334a;--sky2:#4a5d78}
+
+*{box-sizing:border-box;min-width:0}
+html,body{margin:0}
+body{
+  min-height:100vh;color:var(--ink);
+  font:16px/1.5 Rubik,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  background:var(--sky1);
+  overflow-x:clip;-webkit-tap-highlight-color:transparent;
+}
+/* Gradyan sabit katmanda: mobil WebView'lar background-attachment:fixed desteklemez */
+body::before{content:"";position:fixed;inset:0;z-index:0;pointer-events:none;background:linear-gradient(180deg,var(--sky1) 0%,var(--sky2) 100%)}
+.day-name .s{display:none}
+#sky{position:fixed;inset:0;width:100%;height:100%;pointer-events:none;z-index:0}
+.app{
+  position:relative;z-index:1;max-width:1100px;margin:0 auto;
+  padding:max(14px,env(safe-area-inset-top)) max(16px,env(safe-area-inset-right)) max(28px,env(safe-area-inset-bottom)) max(16px,env(safe-area-inset-left));
+}
+a{color:inherit}
+h2{font-size:18px;font-weight:600;margin:0}
+h3{font-size:15px;font-weight:500;margin:0}
+.small{font-size:13px}
+.muted{color:var(--muted)}
+
+/* Üst bar */
+.top{display:flex;align-items:center;gap:10px;margin-bottom:14px}
+.brand{display:flex;align-items:center;gap:8px;font-weight:600;font-size:17px;margin-right:auto;white-space:nowrap}
+.place{
+  display:flex;align-items:center;gap:6px;min-height:44px;padding:0 16px;
+  border-radius:999px;border:1px solid var(--line);background:var(--card);color:var(--ink);
+  font:500 15px/1 inherit;font-family:inherit;cursor:pointer;max-width:58vw;
+  backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);
+}
+.place span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.icon-btn{
+  width:44px;height:44px;flex:none;display:grid;place-items:center;border-radius:50%;
+  border:1px solid var(--line);background:var(--card);color:var(--ink);cursor:pointer;
+  backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);
+}
+.icon-btn.spin svg{animation:spin 1s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+button:focus-visible,input:focus-visible,a:focus-visible{outline:3px solid var(--accent);outline-offset:2px}
+
+/* Kart */
+.card{
+  background:var(--card);border:1px solid var(--line);border-radius:22px;
+  padding:18px;margin-bottom:14px;box-shadow:var(--shadow);
+  backdrop-filter:blur(18px) saturate(1.2);-webkit-backdrop-filter:blur(18px) saturate(1.2);
+}
+.sec-head{display:flex;align-items:baseline;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:12px}
+
+/* Arama */
+.search-row{display:flex;gap:8px}
+.search input{
+  flex:1;min-height:46px;padding:0 14px;border-radius:14px;border:1px solid var(--line);
+  background:rgba(255,255,255,.9);color:#1b2a38;font:16px inherit;font-family:inherit;
+}
+.btn{
+  min-height:46px;padding:0 18px;border-radius:14px;border:0;cursor:pointer;
+  background:var(--ink);color:var(--sky1);font:600 15px inherit;font-family:inherit;
+  display:inline-flex;align-items:center;gap:8px;
+}
+.btn.ghost{background:transparent;color:var(--ink);border:1px solid var(--line);margin-top:10px}
+.results{list-style:none;margin:10px 0 0;padding:0}
+.results button{
+  width:100%;text-align:left;min-height:48px;padding:8px 12px;border:0;border-radius:12px;
+  background:transparent;color:var(--ink);font:15px inherit;font-family:inherit;cursor:pointer;
+}
+.results button:hover{background:var(--card)}
+.results small{color:var(--muted);margin-left:6px}
+
+/* Kahraman alanı */
+.hero{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,1fr);gap:14px;align-items:stretch;margin-bottom:14px}
+.now{display:flex;align-items:center;gap:14px;padding:6px 4px}
+.now-icon svg{width:clamp(96px,18vw,150px);height:auto;filter:drop-shadow(0 8px 18px rgba(0,0,0,.18))}
+.now-temp{font-weight:300;font-size:clamp(76px,15vw,132px);line-height:.95;letter-spacing:-.04em;display:flex}
+.now-temp .deg{font-size:.5em;margin-top:.12em;opacity:.85}
+.now-desc{font-size:21px;font-weight:500;margin-top:4px}
+.now-meta{color:var(--muted);font-size:15px;margin-top:4px}
+.verdict{margin:0;display:flex;flex-direction:column;justify-content:center}
+.verdict-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px}
+.label{font-size:14px;color:var(--muted);font-weight:500}
+.verdict-text{font-size:clamp(22px,3.2vw,28px);line-height:1.2;font-weight:500;margin:0 0 8px;text-wrap:balance}
+.verdict-sub{margin:0;color:var(--muted);font-size:16px}
+.badge{display:inline-flex;align-items:center;gap:6px;padding:5px 11px;border-radius:999px;font-size:13px;font-weight:600;white-space:nowrap;background:rgba(0,0,0,.16)}
+.badge::before{content:"";width:9px;height:9px;border-radius:50%;background:currentColor}
+.lvl-2{color:var(--good)}.lvl-1{color:var(--mid)}.lvl-0{color:var(--bad)}
+
+/* Saatlik şerit */
+.hours{display:flex;gap:6px;overflow-x:auto;scroll-snap-type:x mandatory;padding-bottom:6px;scrollbar-width:thin}
+.hr{flex:0 0 66px;scroll-snap-align:start;text-align:center;padding:10px 4px;border-radius:16px}
+.hr.first{background:rgba(255,255,255,.14)}
+.hr-time{font-size:13px;color:var(--muted);white-space:nowrap}
+.hr svg.ic{width:38px;height:38px;margin:4px auto 2px;display:block}
+.hr-t{font-size:18px;font-weight:500}
+.hr-r{font-size:12px;color:var(--rain);display:flex;align-items:center;justify-content:center;gap:2px;min-height:18px;white-space:nowrap}
+.drop{width:10px;height:10px;flex:none}
+
+/* Günler */
+.days{list-style:none;margin:0;padding:0}
+.day{
+  width:100%;display:grid;grid-template-columns:6.2em 40px 3.4em minmax(0,1fr) 22px;
+  align-items:center;gap:10px;min-height:56px;padding:6px 8px;border:0;border-radius:14px;
+  background:transparent;color:var(--ink);font:15px inherit;font-family:inherit;text-align:left;cursor:pointer;
+}
+.day:hover{background:rgba(255,255,255,.08)}
+.day[aria-pressed=true]{background:rgba(255,255,255,.16)}
+.day-name{font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.day svg.ic{width:36px;height:36px}
+.day-rain{font-size:13px;color:var(--rain);display:flex;align-items:center;gap:3px;white-space:nowrap}
+.range{display:grid;grid-template-columns:2.4em minmax(0,1fr) 2.4em;align-items:center;gap:8px;font-variant-numeric:tabular-nums}
+.range .lo{color:var(--muted);text-align:right}
+.track{position:relative;height:8px;border-radius:99px;background:rgba(255,255,255,.16)}
+.track .spread{position:absolute;top:0;bottom:0;border-radius:99px;background:rgba(255,255,255,.22)}
+.track .core{position:absolute;top:0;bottom:0;border-radius:99px;background:linear-gradient(90deg,#8fd3ff,#ffd66b,#ff9b6b)}
+.dot{width:12px;height:12px;border-radius:50%;background:currentColor;justify-self:center}
+
+/* Hakem masası */
+.scroll{overflow-x:auto}
+.mtable{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums;font-size:15px}
+.mtable th{font-size:13px;font-weight:500;color:var(--muted);text-align:right;padding:6px 8px;border-bottom:1px solid var(--line);white-space:nowrap}
+.mtable th:first-child,.mtable td:first-child{text-align:left}
+.mtable td{padding:8px;text-align:right;border-bottom:1px solid var(--line);white-space:nowrap}
+.mtable td svg.ic{width:28px;height:28px;vertical-align:middle}
+.mname{display:flex;align-items:center;gap:8px}
+.mname i{width:10px;height:10px;border-radius:50%;flex:none}
+.mname small{color:var(--muted);font-size:12px;display:block;line-height:1.2}
+.mtable tr.cons td{font-weight:600;border-bottom:0;background:rgba(255,255,255,.08)}
+.mtable td.off{color:var(--accent);font-weight:600}
+.mtable td.wet{color:var(--rain)}
+.chart-title{margin:20px 0 6px}
+.fig{position:relative;min-height:280px}
+.fig>svg{position:absolute;inset:0;width:100%;height:100%;touch-action:pan-y}
+.readout{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:13px;margin-top:8px;font-variant-numeric:tabular-nums}
+.readout b{font-weight:600}
+.readout span{display:inline-flex;align-items:center;gap:5px;white-space:nowrap}
+.readout i{width:8px;height:8px;border-radius:50%}
+
+.referee p{margin:8px 0 0;max-width:68ch}
+
+footer{padding:6px 4px}
+.themes{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:6px}
+.chips{display:flex;gap:6px;flex-wrap:wrap}
+.chip{min-height:36px;padding:0 12px;border-radius:999px;border:1px solid var(--line);background:var(--card);color:var(--ink);font:13px inherit;font-family:inherit;cursor:pointer}
+.chip[aria-pressed=true]{background:var(--ink);color:var(--sky1);font-weight:600}
+
+.toast{
+  position:fixed;left:50%;bottom:max(20px,env(safe-area-inset-bottom));transform:translateX(-50%);z-index:5;
+  background:rgba(15,20,30,.88);color:#fff;padding:12px 18px;border-radius:14px;font-size:15px;max-width:90vw;
+}
+.skeleton{opacity:.55}
+
+@media (max-width:760px){
+  .hero{grid-template-columns:minmax(0,1fr)}
+}
+@media (max-width:480px){
+  .brand span{display:none}
+  .day{grid-template-columns:4.6em 34px 3em minmax(0,1fr) 14px;gap:7px;padding:6px 4px}
+  .range{grid-template-columns:2em minmax(0,1fr) 2em;gap:6px}
+  .card{padding:14px;border-radius:18px}
+  .mtable{font-size:14px}
+  .mtable .cw,.mname small{display:none}
+  .mtable .u{display:none}
+  .mtable td,.mtable th{padding:7px 5px}
+  .mtable td svg.ic{width:24px;height:24px}
+  .day-name .l{display:none}
+  .day-name .s{display:inline}
+}
+@media (prefers-reduced-motion:reduce){
+  .icon-btn.spin svg{animation:none}
+}
