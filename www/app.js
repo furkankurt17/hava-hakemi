@@ -287,13 +287,18 @@ function init() {
     return { loc, at: Date.now(), bm: bm.value, models };
   }
 
-  async function refresh(quiet) {
-    if (S.loading) return;
+  function refresh(quiet) {
+    if (S.loading) return S.pending;
+    S.pending = doRefresh(quiet);
+    return S.pending;
+  }
+  async function doRefresh(quiet) {
     S.loading = true; $('#refreshBtn').classList.add('spin');
     try {
       const data = await loadForecast(S.loc);
       S.data = data; store.set('hh.cache', data);
       render();
+      loadFavTemps();
     } catch (e) {
       console.error(e);
       if (!S.data) {
@@ -373,6 +378,10 @@ function init() {
 
   function renderTable() {
     const { ms, days } = S.c, i = S.sel, d = days[i];
+    $('#dayChips').innerHTML = days.map((x, k) =>
+      `<button class="chip" type="button" data-i="${k}" aria-pressed="${k === i}">${esc(k < 2 ? dayName(x.date, k) : shortDay(x.date))} ${r0(x.tx)}°</button>`).join('');
+    $('#drawerPlace').textContent = S.loc.name + (S.loc.region ? ', ' + S.loc.region : '');
+    document.querySelectorAll('.day').forEach(x => x.setAttribute('aria-pressed', String(+x.dataset.i === i)));
     $('#deskDay').textContent = dayName(d.date, i) + ' · ' + new Date(d.date + 'T12:00').toLocaleDateString('tr-TR', { day: 'numeric', month: 'long' });
     const row = m => {
       const tx = m.d.tx[i], tn = m.d.tn[i], p = m.d.p[i], w = m.d.w[i];
@@ -412,6 +421,10 @@ function init() {
     }
     const c = near.city, km = Math.round(near.km);
     where.textContent = `${c.name} · ${c.stationName}`;
+    const best = (c.models || []).find(m => m.id !== 'ortak');
+    $('#karneTeaser').textContent = c.days && best
+      ? `${c.name} için en isabetli: ${(MODEL_BY_ID[best.id] || { name: best.id }).name} (±${best.mae.toFixed(1)}°)`
+      : 'Ölçüm birikiyor, ilk sonuçlar yarın';
     const farNote = km > KARNE_MAX_KM
       ? `<p class="muted small">Bulunduğun yere en yakın ölçüm noktası ${esc(c.name)} (${km} km). Bu bölge için ağırlıklandırma yapılmıyor.</p>` : '';
     if (!c.days) {
@@ -639,11 +652,14 @@ function init() {
     $('#placeName').textContent = loc.name;
     toggleSearch(false);
     S.sel = 0;
+    renderFavs();
+    window.scrollTo({ top: 0, behavior: 'smooth' });
     refresh();
   }
   function toggleSearch(open) {
     const el = $('#search'); el.hidden = !open;
     $('#placeBtn').setAttribute('aria-expanded', String(open));
+    renderFavs();
     if (open) { $('#searchInput').focus(); }
   }
   let searchT = 0, searchSeq = 0;
@@ -662,9 +678,191 @@ function init() {
     } catch (e) { if (seq === searchSeq) ul.innerHTML = '<li class="muted small" style="padding:10px 12px">Arama yapılamadı</li>'; }
   }
 
+  /* ---------- Favori konumlar ---------- */
+  S.favs = (store.get('hh.favs') || []).filter(f => f && isFinite(f.lat) && isFinite(f.lon));
+  S.favTemps = {};
+  const locKey = l => (+l.lat).toFixed(2) + ',' + (+l.lon).toFixed(2);
+  const isFav = l => S.favs.some(f => locKey(f) === locKey(l));
+  function saveFavs() { store.set('hh.favs', S.favs); }
+  function toggleFav() {
+    if (isFav(S.loc)) {
+      S.favs = S.favs.filter(f => locKey(f) !== locKey(S.loc));
+      toast(`${S.loc.name} favorilerden çıkarıldı`);
+    } else {
+      if (S.favs.length >= 12) { toast('En fazla 12 favori eklenebilir'); return; }
+      S.favs.push({ name: S.loc.name, region: S.loc.region || '', lat: S.loc.lat, lon: S.loc.lon });
+      toast(`${S.loc.name} favorilere eklendi`);
+      loadFavTemps();
+    }
+    saveFavs(); renderFavs();
+  }
+  function favChip(f) {
+    const tt = S.favTemps[locKey(f)];
+    const cur = locKey(f) === locKey(S.loc);
+    return `<button class="fav" type="button" data-k="${locKey(f)}" aria-current="${cur}">` +
+      (tt ? icon(tt.cat, tt.day) : '') + `<span>${esc(f.name)}</span>` + (tt ? `<span class="ft">${r0(tt.t)}°</span>` : '') + '</button>';
+  }
+  function renderFavs() {
+    const fb = $('#favBtn'), on = isFav(S.loc);
+    fb.setAttribute('aria-pressed', String(on));
+    fb.setAttribute('aria-label', on ? 'Favorilerden çıkar' : 'Favorilere ekle');
+    const row = $('#favRow');
+    row.hidden = !S.favs.length;
+    row.innerHTML = S.favs.map(favChip).join('');
+    const box = $('#favManage');
+    box.hidden = !S.favs.length;
+    $('#favList').innerHTML = S.favs.map((f, i) => `<li class="fav-item">
+      <button type="button" data-fi="${i}">${esc(f.name)}<small>${esc(f.region || '')}</small></button>
+      <button type="button" class="fav-del" data-del="${i}" aria-label="${esc(f.name)} favorisini sil">
+        <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>
+      </button></li>`).join('');
+  }
+  // Tüm favorilerin anlık sıcaklığı tek istekte
+  async function loadFavTemps() {
+    if (!S.favs.length) return;
+    try {
+      const d = await getJSON(API + '?' + qs({
+        latitude: S.favs.map(f => f.lat).join(','), longitude: S.favs.map(f => f.lon).join(','),
+        current: 'temperature_2m,weather_code,is_day', timezone: 'auto' }), 10000);
+      const arr = Array.isArray(d) ? d : [d];
+      arr.forEach((x, i) => {
+        const f = S.favs[i];
+        if (f && x && x.current) S.favTemps[locKey(f)] = { t: x.current.temperature_2m, cat: cat(x.current.weather_code) || 'cloudy', day: x.current.is_day !== 0 };
+      });
+      renderFavs();
+    } catch (e) { /* sıcaklıklar gösterilmez, şerit yine çalışır */ }
+  }
+
+  /* ---------- Yan panel (ayrıntılar) ---------- */
+  const drawer = $('#drawer'), backdrop = $('#backdrop');
+  let lastFocus = null;
+  function setTab(name) {
+    document.querySelectorAll('.tab').forEach(t => t.setAttribute('aria-selected', String(t.dataset.tab === name)));
+    document.querySelectorAll('.panel').forEach(p => { p.hidden = p.id !== 'panel-' + name; });
+    $('#drawerTitle').textContent = { models: 'Hakem masası', chart: '48 saat grafiği', karne: 'Doğruluk karnesi' }[name];
+    $('#drawerBody').scrollTop = 0;
+    if (name === 'chart') requestAnimationFrame(drawChart);
+  }
+  function openDrawer(tab) {
+    if (!S.c && tab !== 'karne') { toast('Veriler henüz yüklenmedi'); return; }
+    setTab(tab || 'models');
+    if (drawer.classList.contains('open')) return;
+    lastFocus = document.activeElement;
+    backdrop.hidden = false;
+    requestAnimationFrame(() => { backdrop.classList.add('show'); drawer.classList.add('open'); });
+    drawer.setAttribute('aria-hidden', 'false');
+    document.body.classList.add('drawer-open');
+    // Telefonun geri tuşu paneli kapatsın
+    try { history.pushState({ drawer: 1 }, '', '#detay'); } catch (e) { /* önemli değil */ }
+    setTimeout(() => $('#drawerClose').focus(), 320);
+  }
+  function closeDrawer(fromHistory) {
+    if (!drawer.classList.contains('open')) return;
+    drawer.classList.remove('open'); backdrop.classList.remove('show');
+    drawer.setAttribute('aria-hidden', 'true');
+    document.body.classList.remove('drawer-open');
+    setTimeout(() => { backdrop.hidden = true; }, 300);
+    if (!fromHistory && history.state && history.state.drawer) { try { history.back(); } catch (e) { /* önemli değil */ } }
+    if (lastFocus && lastFocus.focus) lastFocus.focus();
+  }
+  addEventListener('popstate', () => closeDrawer(true));
+  if (location.hash === '#detay') { try { history.replaceState(null, '', location.pathname + location.search); } catch (e) { /* */ } }
+  document.addEventListener('click', e => {
+    const b = e.target.closest('[data-open]'); if (b) openDrawer(b.dataset.open);
+  });
+  $('#drawerClose').addEventListener('click', () => closeDrawer());
+  backdrop.addEventListener('click', () => closeDrawer());
+  document.addEventListener('keydown', e => { if (e.key === 'Escape') closeDrawer(); });
+  document.querySelector('.tabs').addEventListener('click', e => { const t = e.target.closest('.tab'); if (t) setTab(t.dataset.tab); });
+  document.querySelector('.tabs').addEventListener('keydown', e => {
+    if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return;
+    const tabs = [...document.querySelectorAll('.tab')], i = tabs.findIndex(t => t.getAttribute('aria-selected') === 'true');
+    const n = tabs[(i + (e.key === 'ArrowRight' ? 1 : tabs.length - 1)) % tabs.length];
+    setTab(n.dataset.tab); n.focus();
+  });
+  $('#dayChips').addEventListener('click', e => {
+    const b = e.target.closest('.chip'); if (!b) return;
+    S.sel = +b.dataset.i; renderTable();
+  });
+  // Paneli sağa kaydırarak kapatma
+  {
+    let sx = 0, sy = 0, dx = 0, track = false;
+    drawer.addEventListener('touchstart', e => {
+      const sc = e.target.closest('.scroll, .day-chips');
+      if (e.target.closest('.fig') || (sc && sc.scrollWidth > sc.clientWidth + 2)) { track = false; return; }
+      sx = e.touches[0].clientX; sy = e.touches[0].clientY; dx = 0; track = true;
+    }, { passive: true });
+    drawer.addEventListener('touchmove', e => {
+      if (!track) return;
+      dx = e.touches[0].clientX - sx;
+      const dy = Math.abs(e.touches[0].clientY - sy);
+      if (dy > Math.abs(dx)) { track = false; drawer.style.transform = ''; return; }
+      if (dx > 0) { drawer.style.transition = 'none'; drawer.style.transform = `translateX(${dx}px)`; }
+    }, { passive: true });
+    drawer.addEventListener('touchend', () => {
+      if (!track) return;
+      drawer.style.transition = ''; drawer.style.transform = '';
+      if (dx > 90) closeDrawer();
+      track = false;
+    });
+  }
+
+  /* ---------- Aşağı çekip yenileme ---------- */
+  {
+    const pull = $('#pull'), TH = 72, MAX = 120;
+    let y0 = 0, x0 = 0, dist = 0, active = false, decided = false;
+    const canPull = () => window.scrollY <= 0 && !document.body.classList.contains('drawer-open') && !S.loading;
+    const show = d => {
+      const p = Math.min(1, d / TH);
+      pull.style.opacity = String(p);
+      pull.style.transform = `translateY(${Math.min(d, MAX) - 50}px) rotate(${d * 3}deg)`;
+    };
+    document.addEventListener('touchstart', e => {
+      if (e.touches.length !== 1 || !canPull() || e.target.closest('.drawer, .hours, .fav-row, .search')) { active = false; return; }
+      y0 = e.touches[0].clientY; x0 = e.touches[0].clientX; dist = 0; active = true; decided = false;
+      pull.classList.remove('anim');
+    }, { passive: true });
+    document.addEventListener('touchmove', e => {
+      if (!active) return;
+      const dy = e.touches[0].clientY - y0, dx = e.touches[0].clientX - x0;
+      if (!decided) {
+        if (Math.abs(dy) < 6 && Math.abs(dx) < 6) return;
+        decided = true;
+        if (dy <= 0 || Math.abs(dx) > dy || window.scrollY > 0) { active = false; return; }
+      }
+      dist = Math.max(0, dy * 0.55);
+      if (dist > 0 && e.cancelable) e.preventDefault();
+      show(dist);
+    }, { passive: false });
+    document.addEventListener('touchend', async () => {
+      if (!active) return;
+      active = false;
+      pull.classList.add('anim');
+      if (dist >= TH) {
+        pull.style.opacity = '1'; pull.style.transform = 'translateY(22px)';
+        pull.classList.add('spin');
+        await refresh();
+        pull.classList.remove('spin');
+      }
+      pull.style.opacity = '0'; pull.style.transform = 'translateY(-60px)';
+      dist = 0;
+    });
+  }
+
   /* ---------- Olaylar ---------- */
   $('#placeBtn').addEventListener('click', () => toggleSearch($('#search').hidden));
   $('#refreshBtn').addEventListener('click', () => refresh());
+  $('#favBtn').addEventListener('click', toggleFav);
+  $('#favRow').addEventListener('click', e => {
+    const b = e.target.closest('.fav'); if (!b) return;
+    const f = S.favs.find(x => locKey(x) === b.dataset.k);
+    if (f && locKey(f) !== locKey(S.loc)) setLoc({ ...f });
+  });
+  $('#favList').addEventListener('click', e => {
+    const del = e.target.closest('[data-del]');
+    if (del) { const f = S.favs[+del.dataset.del]; S.favs.splice(+del.dataset.del, 1); saveFavs(); renderFavs(); if (f) toast(`${f.name} favorilerden çıkarıldı`); return; }
+    const b = e.target.closest('[data-fi]'); if (b) setLoc({ ...S.favs[+b.dataset.fi] });
+  });
   $('#searchForm').addEventListener('submit', e => { e.preventDefault(); search($('#searchInput').value); });
   $('#searchInput').addEventListener('input', e => { clearTimeout(searchT); searchT = setTimeout(() => search(e.target.value), 350); });
   $('#searchInput').addEventListener('keydown', e => { if (e.key === 'Escape') toggleSearch(false); });
@@ -683,9 +881,8 @@ function init() {
   $('#days').addEventListener('click', e => {
     const b = e.target.closest('.day'); if (!b || !S.c) return;
     S.sel = +b.dataset.i;
-    document.querySelectorAll('.day').forEach(x => x.setAttribute('aria-pressed', String(x === b)));
     renderTable();
-    if (innerWidth < 760) $('#desk').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    openDrawer('models');
   });
   $('#themeChips').innerHTML = THEMES.map(([k, l]) => `<button class="chip" type="button" data-t="${k}" aria-pressed="${k === 'auto'}">${l}</button>`).join('');
   $('#themeChips').addEventListener('click', e => {
@@ -698,6 +895,7 @@ function init() {
 
   /* ---------- Başlangıç ---------- */
   $('#placeName').textContent = S.loc.name;
+  renderFavs();
   applyTheme();
   S.card = store.get('hh.card');
   const cached = store.get('hh.cache');
