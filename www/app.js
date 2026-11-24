@@ -214,7 +214,7 @@ function init() {
   const esc = s => String(s).replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
   const store = {
     get(k) { try { return JSON.parse(localStorage.getItem(k)); } catch (e) { return null; } },
-    set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) { /* depolama yoksa sorun değil */ } },
+    set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); return true; } catch (e) { return false; } },
   };
   const S = { loc: store.get('hh.loc') || DEFAULT_LOC, data: null, c: null, sel: 0, theme: 'auto', loading: false, card: null };
 
@@ -288,16 +288,18 @@ function init() {
   }
 
   function refresh(quiet) {
+    if (!isFinite(S.loc.lat)) return Promise.resolve();
     if (S.loading) return S.pending;
     S.pending = doRefresh(quiet);
     return S.pending;
   }
   async function doRefresh(quiet) {
     S.loading = true; $('#refreshBtn').classList.add('spin');
+    const loc = S.loc;
     try {
-      const data = await loadForecast(S.loc);
-      S.data = data; store.set('hh.cache', data);
-      render();
+      const data = await loadForecast(loc);
+      cachePut(data);
+      if (locKey(loc) === locKey(S.loc)) { S.data = data; render(); }
       loadFavTemps();
     } catch (e) {
       console.error(e);
@@ -309,6 +311,8 @@ function init() {
       if (!quiet || !S.data) toast('Hava verisi alınamadı. Bağlantıyı kontrol et.');
     } finally {
       S.loading = false; $('#refreshBtn').classList.remove('spin');
+      // Yükleme sürerken başka konuma geçildiyse onu da yükle
+      if (locKey(loc) !== locKey(S.loc)) refresh(true);
     }
   }
 
@@ -647,14 +651,47 @@ function init() {
   })();
 
   /* ---------- Konum ve arama ---------- */
-  function setLoc(loc) {
+  function setLoc(loc, dir = 0) {
     S.loc = loc; store.set('hh.loc', loc);
     $('#placeName').textContent = loc.name;
     toggleSearch(false);
     S.sel = 0;
-    renderFavs();
-    window.scrollTo({ top: 0, behavior: 'smooth' });
-    refresh();
+    const c = cacheGet(loc);
+    slide(dir, () => {
+      if (c) { S.data = c; try { render(); } catch (e) { console.error(e); showLoading(loc); } }
+      else showLoading(loc);
+      renderFavs();
+    });
+    window.scrollTo({ top: 0 });
+    refresh(!!c);
+  }
+  function showLoading(loc) {
+    S.data = null; S.c = null;
+    $('#nowIcon').innerHTML = ''; $('#nowTemp').textContent = '--';
+    $('#nowDesc').textContent = 'Yükleniyor…'; $('#nowMeta').textContent = '';
+    $('#conf').hidden = true;
+    $('#verdictText').textContent = `${loc.name} için modeller soruluyor…`;
+    $('#verdictSub').textContent = '';
+    $('#hours').innerHTML = ''; $('#days').innerHTML = '';
+  }
+  // Konum değişirken içerik kayarak çıkar, karşı taraftan girer
+  function slide(dir, fn) {
+    const m = document.querySelector('main');
+    if (!dir || matchMedia('(prefers-reduced-motion: reduce)').matches) { m.style.transform = ''; m.style.opacity = ''; fn(); return; }
+    m.style.transition = 'transform .15s ease-in, opacity .15s ease-in';
+    m.style.transform = `translateX(${-dir * 40}px)`; m.style.opacity = '0';
+    setTimeout(() => {
+      fn();
+      m.style.transition = 'none'; m.style.transform = `translateX(${dir * 40}px)`;
+      void m.offsetWidth;
+      m.style.transition = 'transform .22s ease-out, opacity .22s ease-out';
+      m.style.transform = ''; m.style.opacity = '';
+    }, 150);
+  }
+  function bounce(dir) {
+    const m = document.querySelector('main');
+    m.style.transition = 'transform .12s ease-out'; m.style.transform = `translateX(${-dir * 18}px)`;
+    setTimeout(() => { m.style.transition = 'transform .2s ease-out'; m.style.transform = ''; }, 120);
   }
   function toggleSearch(open) {
     const el = $('#search'); el.hidden = !open;
@@ -678,59 +715,170 @@ function init() {
     } catch (e) { if (seq === searchSeq) ul.innerHTML = '<li class="muted small" style="padding:10px 12px">Arama yapılamadı</li>'; }
   }
 
-  /* ---------- Favori konumlar ---------- */
+  /* ---------- Favori konumlar ve kaydırarak gezilen sayfalar ---------- */
   S.favs = (store.get('hh.favs') || []).filter(f => f && isFinite(f.lat) && isFinite(f.lon));
   S.favTemps = {};
-  const locKey = l => (+l.lat).toFixed(2) + ',' + (+l.lon).toFixed(2);
+  S.gps = store.get('hh.gps'); // son bilinen konum
+  function locKey(l) { return l && isFinite(l.lat) && isFinite(l.lon) ? (+l.lat).toFixed(2) + ',' + (+l.lon).toFixed(2) : 'gps?'; }
   const isFav = l => S.favs.some(f => locKey(f) === locKey(l));
   function saveFavs() { store.set('hh.favs', S.favs); }
+  // Favori varsa sayfalar: [Konumum, ...favoriler]
+  function pages() { return S.favs.length ? [S.gps || { name: 'Konumum', gps: true, lat: NaN, lon: NaN }, ...S.favs] : []; }
+  function pageIndex() {
+    const ps = pages();
+    if (!ps.length) return -1;
+    if (S.loc.gps) return 0;
+    return ps.findIndex((p, i) => i > 0 && locKey(p) === locKey(S.loc));
+  }
   function toggleFav() {
+    if (!isFinite(S.loc.lat)) return;
     if (isFav(S.loc)) {
       S.favs = S.favs.filter(f => locKey(f) !== locKey(S.loc));
       toast(`${S.loc.name} favorilerden çıkarıldı`);
     } else {
       if (S.favs.length >= 12) { toast('En fazla 12 favori eklenebilir'); return; }
-      S.favs.push({ name: S.loc.name, region: S.loc.region || '', lat: S.loc.lat, lon: S.loc.lon });
-      toast(`${S.loc.name} favorilere eklendi`);
+      S.favs.push({ name: S.loc.name, region: S.loc.gps ? '' : S.loc.region || '', lat: S.loc.lat, lon: S.loc.lon });
+      if (!store.get('hh.hint')) { toast('İpucu: sağa sola kaydırarak konumlar arasında geçebilirsin'); store.set('hh.hint', 1); }
+      else toast(`${S.loc.name} favorilere eklendi`);
       loadFavTemps();
     }
     saveFavs(); renderFavs();
   }
-  function favChip(f) {
-    const tt = S.favTemps[locKey(f)];
-    const cur = locKey(f) === locKey(S.loc);
-    return `<button class="fav" type="button" data-k="${locKey(f)}" aria-current="${cur}">` +
-      (tt ? icon(tt.cat, tt.day) : '') + `<span>${esc(f.name)}</span>` + (tt ? `<span class="ft">${r0(tt.t)}°</span>` : '') + '</button>';
+  const NAV = '<svg class="nav" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M20 4L4 11l7 2 2 7z" fill="currentColor"/></svg>';
+  function favChip(p, i, cur) {
+    const tt = isFinite(p.lat) ? S.favTemps[locKey(p)] : null;
+    const label = i === 0 ? (S.gps ? S.gps.name : 'Konumum') : p.name;
+    return `<button class="fav${i === 0 ? ' gps' : ''}" type="button" data-p="${i}" aria-current="${i === cur}"${i === 0 ? ' aria-label="Bulunduğun konum: ' + esc(label) + '"' : ''}>` +
+      (i === 0 ? NAV : '') + (tt ? icon(tt.cat, tt.day) : '') + `<span>${esc(label)}</span>` + (tt ? `<span class="ft">${r0(tt.t)}°</span>` : '') + '</button>';
   }
   function renderFavs() {
     const fb = $('#favBtn'), on = isFav(S.loc);
     fb.setAttribute('aria-pressed', String(on));
     fb.setAttribute('aria-label', on ? 'Favorilerden çıkar' : 'Favorilere ekle');
+    const ps = pages(), cur = pageIndex();
     const row = $('#favRow');
-    row.hidden = !S.favs.length;
-    row.innerHTML = S.favs.map(favChip).join('');
-    const box = $('#favManage');
-    box.hidden = !S.favs.length;
+    row.hidden = !ps.length;
+    row.innerHTML = ps.map((p, i) => favChip(p, i, cur)).join('');
+    const act = row.querySelector('[aria-current="true"]');
+    if (act) row.scrollTo({ left: act.offsetLeft - (row.clientWidth - act.offsetWidth) / 2, behavior: 'smooth' });
+    $('#favManage').hidden = !S.favs.length;
     $('#favList').innerHTML = S.favs.map((f, i) => `<li class="fav-item">
       <button type="button" data-fi="${i}">${esc(f.name)}<small>${esc(f.region || '')}</small></button>
       <button type="button" class="fav-del" data-del="${i}" aria-label="${esc(f.name)} favorisini sil">
         <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>
       </button></li>`).join('');
   }
-  // Tüm favorilerin anlık sıcaklığı tek istekte
+  // Tüm sayfaların anlık sıcaklığı tek istekte
   async function loadFavTemps() {
-    if (!S.favs.length) return;
+    const list = pages().filter(p => isFinite(p.lat));
+    if (!list.length) return;
     try {
       const d = await getJSON(API + '?' + qs({
-        latitude: S.favs.map(f => f.lat).join(','), longitude: S.favs.map(f => f.lon).join(','),
+        latitude: list.map(f => f.lat).join(','), longitude: list.map(f => f.lon).join(','),
         current: 'temperature_2m,weather_code,is_day', timezone: 'auto' }), 10000);
       const arr = Array.isArray(d) ? d : [d];
       arr.forEach((x, i) => {
-        const f = S.favs[i];
+        const f = list[i];
         if (f && x && x.current) S.favTemps[locKey(f)] = { t: x.current.temperature_2m, cat: cat(x.current.weather_code) || 'cloudy', day: x.current.is_day !== 0 };
       });
       renderFavs();
     } catch (e) { /* sıcaklıklar gösterilmez, şerit yine çalışır */ }
+  }
+
+  /* ---------- Konum başına önbellek: kaydırınca anında göster ---------- */
+  function cacheGet(loc) {
+    const all = store.get('hh.caches') || {};
+    const c = all[locKey(loc)];
+    return c && c.bm && c.models ? c : null;
+  }
+  function cachePut(data) {
+    const all = store.get('hh.caches') || {};
+    all[locKey(data.loc)] = data;
+    const keep = new Set([...pages().map(locKey), locKey(S.loc)]);
+    for (const k of Object.keys(all)) if (!keep.has(k)) delete all[k];
+    if (!store.set('hh.caches', all)) store.set('hh.caches', { [locKey(data.loc)]: data });
+  }
+
+  /* ---------- Bulunduğun konum ---------- */
+  function locateRaw() {
+    return new Promise(res => {
+      if (!navigator.geolocation) { res(null); return; }
+      navigator.geolocation.getCurrentPosition(
+        p => res({ lat: +p.coords.latitude.toFixed(4), lon: +p.coords.longitude.toFixed(4) }),
+        () => res(null), { timeout: 8000, maximumAge: 300000 });
+    });
+  }
+  async function reverseName(c) {
+    try {
+      const d = await getJSON(`https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${c.lat}&longitude=${c.lon}&localityLanguage=tr`, 6000);
+      return (d && (d.locality || d.city || d.principalSubdivision)) || null;
+    } catch (e) { return null; }
+  }
+  async function gpsLocate() {
+    const c = await locateRaw();
+    if (!c) return null;
+    const name = await reverseName(c);
+    const loc = { name: name || 'Konumum', region: 'Bulunduğun yer', lat: c.lat, lon: c.lon, gps: true };
+    S.gps = loc; store.set('hh.gps', loc);
+    return loc;
+  }
+  // GPS sayfasını aç: bilinen konumla hemen, sonra taze konumla güncelle
+  function openGps(dir) {
+    if (S.gps) {
+      setLoc(S.gps, dir);
+      gpsLocate().then(l => {
+        if (!l || !S.loc.gps) return;
+        if (distKm(l, S.loc) > 1) setLoc(l, 0);
+        else { S.loc = l; store.set('hh.loc', l); $('#placeName').textContent = l.name; renderFavs(); }
+      });
+    } else {
+      toast('Konumun bulunuyor…');
+      gpsLocate().then(l => { if (l) setLoc(l, dir); else toast('Konum alınamadı. İzin verdiğinden emin ol.'); });
+    }
+  }
+  function goPage(i, dir) {
+    const p = pages()[i];
+    if (!p) return;
+    if (i === 0) openGps(dir); else setLoc({ ...p }, dir);
+  }
+  function swipe(dir) {
+    const ps = pages();
+    if (ps.length < 2) return;
+    const cur = pageIndex();
+    const target = cur < 0 ? (dir > 0 ? 0 : ps.length - 1) : cur + dir;
+    if (target < 0 || target >= ps.length) { bounce(dir); return; }
+    goPage(target, dir);
+  }
+  // Sağa / sola kaydırma
+  {
+    let x0 = 0, y0 = 0, lx = 0, ly = 0, t0 = 0, on = false, horiz = null;
+    const main = document.querySelector('main');
+    document.addEventListener('touchstart', e => {
+      on = e.touches.length === 1 && pages().length > 1 && !document.body.classList.contains('drawer-open') &&
+        !e.target.closest('.drawer, .hours, .fav-row, .search, .scroll, .fig, .day-chips, input, .themes');
+      if (!on) return;
+      x0 = lx = e.touches[0].clientX; y0 = ly = e.touches[0].clientY; t0 = Date.now(); horiz = null;
+    }, { passive: true });
+    document.addEventListener('touchmove', e => {
+      if (!on) return;
+      lx = e.touches[0].clientX; ly = e.touches[0].clientY;
+      const dx = lx - x0, dy = ly - y0;
+      if (horiz === null && (Math.abs(dx) > 8 || Math.abs(dy) > 8)) horiz = Math.abs(dx) > Math.abs(dy) * 1.4;
+      if (horiz) { main.style.transition = 'none'; main.style.transform = `translateX(${dx * 0.3}px)`; }
+    }, { passive: true });
+    const end = () => {
+      if (!on) return;
+      on = false;
+      const dx = lx - x0, dy = ly - y0;
+      if (horiz && Math.abs(dx) > 60 && Math.abs(dx) > Math.abs(dy) * 1.4 && Date.now() - t0 < 900) swipe(dx < 0 ? 1 : -1);
+      else if (horiz) { main.style.transition = 'transform .2s ease-out'; main.style.transform = ''; }
+    };
+    document.addEventListener('touchend', end);
+    document.addEventListener('touchcancel', end);
+    document.addEventListener('keydown', e => {
+      if ((e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') || document.body.classList.contains('drawer-open') || e.target.closest('input, .tabs, .hours, .fav-row')) return;
+      swipe(e.key === 'ArrowRight' ? 1 : -1);
+    });
   }
 
   /* ---------- Yan panel (ayrıntılar) ---------- */
@@ -855,8 +1003,9 @@ function init() {
   $('#favBtn').addEventListener('click', toggleFav);
   $('#favRow').addEventListener('click', e => {
     const b = e.target.closest('.fav'); if (!b) return;
-    const f = S.favs.find(x => locKey(x) === b.dataset.k);
-    if (f && locKey(f) !== locKey(S.loc)) setLoc({ ...f });
+    const i = +b.dataset.p, cur = pageIndex();
+    if (i === cur) return;
+    goPage(i, cur < 0 ? 0 : Math.sign(i - cur));
   });
   $('#favList').addEventListener('click', e => {
     const del = e.target.closest('[data-del]');
@@ -873,10 +1022,9 @@ function init() {
   });
   $('#geoBtn').addEventListener('click', () => {
     if (!navigator.geolocation) { toast('Bu cihaz konum vermiyor. Şehir aramayı kullan.'); return; }
-    navigator.geolocation.getCurrentPosition(
-      p => setLoc({ name: 'Konumum', region: '', lat: +p.coords.latitude.toFixed(4), lon: +p.coords.longitude.toFixed(4) }),
-      () => toast('Konum izni verilmedi. Şehir aramayı kullan.'),
-      { timeout: 12000, maximumAge: 600000 });
+    toggleSearch(false);
+    toast('Konumun bulunuyor…');
+    gpsLocate().then(l => { if (l) setLoc(l); else toast('Konum alınamadı. İzin verdiğinden emin ol ya da şehir ara.'); });
   });
   $('#days').addEventListener('click', e => {
     const b = e.target.closest('.day'); if (!b || !S.c) return;
@@ -893,17 +1041,50 @@ function init() {
   chartRO.observe($('#chartFig'));
   setInterval(() => { if (!document.hidden) refresh(true); }, 30 * 60 * 1000);
 
+  /* ---------- Android geri tuşu (Capacitor App eklentisi) ---------- */
+  // Dinleyici kaydedilince Android'in varsayılan "uygulamadan çık" davranışı devre dışı kalır
+  try {
+    const capApp = window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.App;
+    if (capApp && capApp.addListener) {
+      capApp.addListener('backButton', () => {
+        if (document.body.classList.contains('drawer-open')) closeDrawer();
+        else if (!$('#search').hidden) toggleSearch(false);
+        else capApp.exitApp();
+      });
+    }
+  } catch (e) { console.warn('Geri tuşu dinlenemedi', e); }
+
   /* ---------- Başlangıç ---------- */
-  $('#placeName').textContent = S.loc.name;
-  renderFavs();
+  try { localStorage.removeItem('hh.cache'); } catch (e) { /* eski tek konumluk önbellek */ }
   applyTheme();
   S.card = store.get('hh.card');
-  const cached = store.get('hh.cache');
-  if (cached && cached.loc && cached.loc.lat === S.loc.lat && cached.loc.lon === S.loc.lon && cached.bm && cached.models) {
-    S.data = cached;
-    try { render(); } catch (e) { console.error(e); S.data = null; }
+  if (S.favs.length) {
+    // Favori varsa açılışta bulunduğun konum gösterilir; konum alınamazsa ilk favori
+    if (S.gps) setLoc(S.gps);
+    else {
+      S.loc = { name: 'Konumum', gps: true, lat: NaN, lon: NaN };
+      $('#placeName').textContent = 'Konum bulunuyor…';
+      showLoading({ name: 'Bulunduğun konum' });
+      renderFavs();
+    }
+    gpsLocate().then(l => {
+      if (!S.loc.gps) return; // bu arada başka konuma geçildi
+      if (l) {
+        if (!isFinite(S.loc.lat) || distKm(l, S.loc) > 1) setLoc(l);
+        else { S.loc = l; store.set('hh.loc', l); $('#placeName').textContent = l.name; renderFavs(); }
+      } else if (!isFinite(S.loc.lat)) {
+        toast('Konum alınamadı, ilk favori açıldı');
+        setLoc({ ...S.favs[0] });
+      }
+    });
+  } else {
+    if (!isFinite(S.loc.lat)) S.loc = DEFAULT_LOC;
+    $('#placeName').textContent = S.loc.name;
+    renderFavs();
+    const c = cacheGet(S.loc);
+    if (c) { S.data = c; try { render(); } catch (e) { console.error(e); S.data = null; } }
+    refresh(!!S.data);
   }
-  refresh(!!S.data);
   loadCard();
 }
 }

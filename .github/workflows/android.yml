@@ -5,7 +5,7 @@ name: Android APK
 on:
   push:
     branches: [main]
-    paths: ['capacitor.config.json', 'package.json', 'www/offline.html', '.github/workflows/android.yml']
+    paths: ['capacitor.config.json', 'package.json', 'www/offline.html', 'signing/**', '.github/workflows/android.yml']
   workflow_dispatch:
 
 permissions:
@@ -44,6 +44,12 @@ jobs:
 
       - name: Senkronize et
         run: npx cap sync android
+
+      # Sabit imza: yeni APK eskisinin üstüne güncelleme olarak kurulabilsin
+      - name: Sabit hata ayıklama imzası
+        run: |
+          mkdir -p ~/.android
+          cp signing/debug.keystore ~/.android/debug.keystore
 
       - name: APK derle
         run: |

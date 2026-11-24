@@ -27,3 +27,7 @@ tek bir karar veren hava tahmini uygulaması. Veri: [Open-Meteo](https://open-me
 - Her gün bugün (aynı gün) ve yarın (1 gün önceden) için tüm modellerin tahmini kaydedilir, gün bitince ölçümle karşılaştırılır.
 - Puanlar: sıcaklık için ortalama mutlak hata (°C), yağış için "o gün yağdı mı" sorusunu doğru bilme oranı. Son 30 gün.
 - Uygulama, konuma 150 km'den yakın bir şehrin en az 5 günlük karnesi varsa sıcaklık ortak görüşünü 1/hata² ağırlıklı ortalamayla hesaplar.
+
+## APK imzası
+`signing/debug.keystore` sabit bir hata ayıklama anahtarıdır (şifre: android). Her derleme aynı anahtarla imzalandığı için
+yeni APK eskisinin üstüne güncelleme olarak kurulur. Play Store'a çıkılacaksa ayrı, gizli bir yayın anahtarı oluşturulmalı.

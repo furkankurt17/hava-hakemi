@@ -1,10 +1,11 @@
 {
   "name": "hava-hakemi",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "8 hava modelini karşılaştırıp tek karar veren hava tahmini uygulaması",
   "dependencies": {
     "@capacitor/android": "^7.0.0",
+    "@capacitor/app": "^7.0.0",
     "@capacitor/core": "^7.0.0"
   },
   "devDependencies": {
