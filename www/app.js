@@ -14,6 +14,8 @@ const MODELS = [
 const DEFAULT_LOC = { name: 'İstanbul', region: 'Türkiye', lat: 41.0138, lon: 28.9497 };
 const API = 'https://api.open-meteo.com/v1/forecast';
 const GEO = 'https://geocoding-api.open-meteo.com/v1/search';
+const AQ = 'https://air-quality-api.open-meteo.com/v1/air-quality';
+const FORECAST_DAYS = 14;
 const HOURLY = 'temperature_2m,precipitation,weather_code,wind_speed_10m';
 const DAILY = 'temperature_2m_max,temperature_2m_min,precipitation_sum,weather_code,wind_speed_10m_max';
 const RAIN_H = 0.1;   // saatlik: bu kadar mm ve üstü "yağış var"
@@ -119,7 +121,7 @@ function compute(data, weights) {
     const share = ps.length ? rainN / ps.length : 0;
     return {
       time, t: consensusT(ms, m => m.h.t[i], weights), tLo: ts.length ? Math.min(...ts) : null, tHi: ts.length ? Math.max(...ts) : null,
-      n: ps.length, rainN, share, p: median(ps),
+      n: ps.length, rainN, share, p: median(ps), w: median(nums(ms.map(m => m.h.w[i]))),
       cat: consensusCat(ms.map(m => cat(m.h.c[i])), share),
       isDay: isDayArr[i] !== 0,
     };
@@ -201,9 +203,63 @@ function weightsFor(card, loc) {
   return w;
 }
 
+/* ================= Ay: evre, doğuş, batış ================= */
+const RAD = Math.PI / 180, DAY_MS = 864e5;
+const toJ2000 = ms => ms / DAY_MS + 2440587.5 - 2451545;
+function moonAltitude(ms, lat, lon) {
+  const d = toJ2000(ms);
+  const L = RAD * (218.316 + 13.176396 * d), M = RAD * (134.963 + 13.064993 * d), F = RAD * (93.272 + 13.229350 * d);
+  const l = L + RAD * 6.289 * Math.sin(M), b = RAD * 5.128 * Math.sin(F), e = RAD * 23.4397;
+  const ra = Math.atan2(Math.sin(l) * Math.cos(e) - Math.tan(b) * Math.sin(e), Math.cos(l));
+  const dec = Math.asin(Math.sin(b) * Math.cos(e) + Math.cos(b) * Math.sin(e) * Math.sin(l));
+  const H = RAD * (280.16 + 360.9856235 * d) + RAD * lon - ra, phi = RAD * lat;
+  return Math.asin(Math.sin(phi) * Math.sin(dec) + Math.cos(phi) * Math.cos(dec) * Math.cos(H));
+}
+// Yerel gün (dateStr) içinde ayın doğduğu ve battığı saatler, 10 dakikalık adımlarla
+function moonTimes(dateStr, offsetSec, lat, lon) {
+  const t0 = Date.parse(dateStr + 'T00:00:00Z') - offsetSec * 1000, h0 = 0.133 * RAD;
+  let rise = null, set = null, prev = moonAltitude(t0, lat, lon) - h0;
+  for (let m = 10; m <= 1440; m += 10) {
+    const t = t0 + m * 60000, cur = moonAltitude(t, lat, lon) - h0;
+    if (prev < 0 && cur >= 0 && rise == null) rise = t - 600000 * cur / (cur - prev);
+    if (prev >= 0 && cur < 0 && set == null) set = t - 600000 * cur / (cur - prev);
+    prev = cur;
+  }
+  const fmt = ms => (ms == null ? null : new Date(ms + offsetSec * 1000).toISOString().slice(11, 16));
+  return { rise: fmt(rise), set: fmt(set) };
+}
+function moonPhase(ms) {
+  const SYN = 29.530588853, jd = ms / DAY_MS + 2440587.5;
+  const age = (((jd - 2451550.1) % SYN) + SYN) % SYN, frac = age / SYN;
+  const names = ['Yeni Ay', 'Büyüyen Hilal', 'İlk Dördün', 'Büyüyen Şişkin Ay', 'Dolunay', 'Küçülen Şişkin Ay', 'Son Dördün', 'Küçülen Hilal'];
+  return { age, frac, illum: (1 - Math.cos(2 * Math.PI * frac)) / 2, waxing: frac < 0.5, name: names[Math.floor(frac * 8 + 0.5) % 8] };
+}
+
+/* ================= Seviyeler ve açıklamalar ================= */
+const band = (v, list) => list.find(([lim]) => v < lim)[1];
+const aqiInfo = v => band(v, [[20, 'İyi'], [40, 'Makul'], [60, 'Orta'], [80, 'Kötü'], [100, 'Çok kötü'], [Infinity, 'Son derece kötü']]);
+const uvInfo = v => band(v, [[3, 'Düşük'], [6, 'Orta'], [8, 'Yüksek'], [11, 'Çok yüksek'], [Infinity, 'Aşırı']]);
+const pollenInfo = v => (v == null ? 'Veri yok' : band(v, [[1, 'Yok'], [20, 'Düşük'], [50, 'Orta'], [150, 'Yüksek'], [Infinity, 'Çok yüksek']]));
+const windInfo = v => band(v, [[2, 'Sakin'], [6, 'Neredeyse durgun'], [12, 'Hafif bir esinti'], [20, 'Hafif rüzgâr'], [29, 'Orta rüzgâr'], [39, 'Sert esinti'], [50, 'Kuvvetli rüzgâr'], [62, 'Fırtınamsı'], [75, 'Fırtına'], [Infinity, 'Şiddetli fırtına']]);
+const visInfo = km => band(km, [[1, 'Sis, çok kısıtlı'], [2, 'Zayıf'], [5, 'Pus var, orta'], [10, 'İyi'], [Infinity, 'Çok iyi']]);
+const dewInfo = v => band(v, [[5, 'Hava çok kuru'], [10, 'Hava kuru'], [16, 'Rahat'], [20, 'Biraz nemli'], [24, 'Boğucu'], [Infinity, 'Bunaltıcı']]);
+const WIND_FROM = ['Kuzeyden', 'Kuzeydoğudan', 'Doğudan', 'Güneydoğudan', 'Güneyden', 'Güneybatıdan', 'Batıdan', 'Kuzeybatıdan'];
+const windFrom = deg => WIND_FROM[Math.round((((deg % 360) + 360) % 360) / 45) % 8];
+// Koşu uygunluğu: 0-100
+function runScore(t, share, wind, aqi) {
+  if (t == null) return null;
+  let s = 100;
+  if (t < 8) s -= (8 - t) * 4; else if (t > 20) s -= (t - 20) * 5;
+  if (share >= 0.5) s -= 45; else s -= share * 40;
+  if (wind > 25) s -= (wind - 25) * 1.5;
+  if (aqi > 60) s -= (aqi - 60) * 0.8;
+  return Math.max(0, Math.min(100, Math.round(s)));
+}
+const runInfo = s => (s == null ? '–' : s >= 70 ? 'İyi' : s >= 45 ? 'Orta' : 'Kötü');
+
 /* ================= Node testleri için dışa aç ================= */
 if (typeof document === 'undefined') {
-  if (typeof module !== 'undefined') module.exports = { compute, consensusT, weightsFor, nearestCity, verdict, cat, majority, consensusCat, median, column, MODELS };
+  if (typeof module !== 'undefined') module.exports = { moonTimes, moonPhase, aqiInfo, uvInfo, pollenInfo, windInfo, windFrom, runScore, runInfo, compute, consensusT, weightsFor, nearestCity, verdict, cat, majority, consensusCat, median, column, MODELS };
 } else {
   init();
 }
@@ -272,19 +328,27 @@ function init() {
 
   /* ---------- Veri çekme ---------- */
   async function loadForecast(loc) {
-    const base = { latitude: loc.lat, longitude: loc.lon, timezone: 'auto', forecast_days: 7 };
+    const base = { latitude: loc.lat, longitude: loc.lon, timezone: 'auto', forecast_days: FORECAST_DAYS };
+    const geo = { latitude: loc.lat, longitude: loc.lon, timezone: 'auto' };
+    // Ek bilgiler (dün, UV, basınç, görünürlük...) ve hava kalitesi: başarısız olursa uygulama yine çalışır
+    const extP = getJSON(API + '?' + qs({ ...geo, past_days: 1, forecast_days: 3,
+      current: 'wind_direction_10m,wind_gusts_10m,dew_point_2m,pressure_msl,visibility,uv_index,cloud_cover',
+      hourly: 'pressure_msl,relative_humidity_2m,uv_index,visibility',
+      daily: 'sunrise,sunset,uv_index_max,daylight_duration,temperature_2m_max,temperature_2m_min,weather_code' })).catch(() => null);
+    const aqP = getJSON(AQ + '?' + qs({ ...geo, forecast_days: 1,
+      current: 'european_aqi,pm10,pm2_5,alder_pollen,birch_pollen,grass_pollen,mugwort_pollen,olive_pollen,ragweed_pollen' })).catch(() => null);
     const bmP = getJSON(API + '?' + qs({ ...base,
       current: 'temperature_2m,apparent_temperature,relative_humidity_2m,weather_code,is_day,wind_speed_10m',
       hourly: 'is_day', daily: 'sunrise,sunset' }));
     const mPs = MODELS.map(m => getJSON(API + '?' + qs({ ...base, hourly: HOURLY, daily: DAILY, models: m.id }))
       .then(d => ({ ...m, hourly: d.hourly, daily: d.daily })));
-    const [bm, ...rs] = await Promise.allSettled([bmP, ...mPs]);
+    const [bm, ext, aq, ...rs] = await Promise.allSettled([bmP, extP, aqP, ...mPs]);
     if (bm.status !== 'fulfilled') throw bm.reason;
     const usable = m => m.hourly && Array.isArray(m.hourly.time) &&
       Object.keys(m.hourly).some(k => k.startsWith('temperature_2m') && (m.hourly[k] || []).some(v => v != null));
     const models = rs.filter(r => r.status === 'fulfilled' && usable(r.value)).map(r => r.value);
     if (models.length < 2) throw new Error('Yeterli model yanıt vermedi');
-    return { loc, at: Date.now(), bm: bm.value, models };
+    return { loc, at: Date.now(), bm: bm.value, models, ext: ext.value || null, aq: aq.value || null };
   }
 
   function refresh(quiet) {
@@ -343,33 +407,9 @@ function init() {
     $('#verdictSub').textContent = v.sub;
     const b = $('#conf'); b.hidden = false; b.className = 'badge lvl-' + v.lvl; b.textContent = LVL_TEXT[v.lvl];
 
-    // Saatlik
-    $('#hours').innerHTML = hours.slice(start, start + 24).map((h, k) => `
-      <div class="hr${k === 0 ? ' first' : ''}">
-        <div class="hr-time">${k === 0 ? 'Şimdi' : hh(h.time) === '00:00' ? esc(shortDay(h.time.slice(0, 10))) : hh(h.time)}</div>
-        ${icon(h.cat, h.isDay)}
-        <div class="hr-t">${r0(h.t)}°</div>
-        <div class="hr-r">${h.rainN ? DROP + h.rainN + '/' + h.n : ''}</div>
-      </div>`).join('');
-
-    // Günler
-    const lo = Math.min(...nums(days.map(d => d.tnLo))), hi = Math.max(...nums(days.map(d => d.txHi)));
-    const pct = t => (((t - lo) / Math.max(1, hi - lo)) * 100).toFixed(1);
-    $('#days').innerHTML = days.map((d, i) => `
-      <li><button class="day" data-i="${i}" aria-pressed="${i === S.sel}">
-        <span class="day-name"><span class="l">${esc(dayName(d.date, i))}</span><span class="s">${esc(i < 2 ? dayName(d.date, i) : shortDay(d.date))}</span></span>
-        ${icon(d.cat, true)}
-        <span class="day-rain">${d.rainN ? DROP + d.rainN + '/' + d.n : ''}</span>
-        <span class="range">
-          <span class="lo">${r0(d.tn)}°</span>
-          <span class="track">
-            ${d.tnLo != null && d.txHi != null ? `<span class="spread" style="left:${pct(d.tnLo)}%;right:${(100 - pct(d.txHi)).toFixed(1)}%"></span>` : ''}
-            ${d.tn != null && d.tx != null ? `<span class="core" style="left:${pct(d.tn)}%;right:${(100 - pct(d.tx)).toFixed(1)}%"></span>` : ''}
-          </span>
-          <span>${r0(d.tx)}°</span>
-        </span>
-        <span class="dot lvl-${d.lvl}" title="${LVL_TEXT[d.lvl]}"></span>
-      </button></li>`).join('');
+    renderHours();
+    renderDays();
+    renderTiles();
 
     renderTable();
     drawChart();
@@ -403,6 +443,270 @@ function init() {
       <tbody>${ms.map(row).join('')}
       <tr class="cons"><td>Ortak görüş</td><td>${icon(d.cat, true)}</td><td>${r0(d.tx)}°</td><td>${r0(d.tn)}°</td>
       <td>${d.p == null ? "–" : d.p.toFixed(1)}<span class="u"> mm</span></td><td class="cw">${r0(d.w)} km/sa</td></tr></tbody>`;
+  }
+
+  /* ---------- Saatlik şerit: sıcaklık eğrisi + gün doğumu/batımı ---------- */
+  const STEP = 68; // .hr genişliği 64 + boşluk 4
+  const tMin = t => Date.parse(t + 'Z') / 60000;
+  function sunIcon(kind) {
+    return `<svg class="ic" viewBox="0 0 36 36" aria-hidden="true"><path d="M11 23.5a7 7 0 0 1 14 0z" fill="#ffd23f"/>` +
+      `<g stroke="#ffd23f" stroke-width="2" stroke-linecap="round"><line x1="18" y1="11" x2="18" y2="13.5"/><line x1="9.5" y1="15" x2="11.3" y2="16.8"/><line x1="26.5" y1="15" x2="24.7" y2="16.8"/></g>` +
+      `<line x1="6" y1="24.5" x2="30" y2="24.5" stroke="currentColor" stroke-width="2" stroke-linecap="round" opacity=".8"/>` +
+      `<path d="${kind === 'rise' ? 'M18 33v-5m-2.5 2.5L18 28l2.5 2.5' : 'M18 28v5m-2.5-2.5L18 33l2.5-2.5'}" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" opacity=".85"/></svg>`;
+  }
+  function renderHours() {
+    const { hours, start } = S.c;
+    const list = hours.slice(start, start + 25);
+    const d = S.data.bm.daily || {};
+    const ev = [...(d.sunrise || []).map(t => ({ t, kind: 'rise' })), ...(d.sunset || []).map(t => ({ t, kind: 'set' }))].filter(e => e.t);
+    const items = [];
+    list.forEach((h, k) => {
+      if (k >= 24) return;
+      items.push({ h, k });
+      const nx = list[k + 1];
+      if (!nx) return;
+      for (const e of ev) {
+        if (e.t > h.time && e.t < nx.time) {
+          const f = (tMin(e.t) - tMin(h.time)) / 60;
+          items.push({ sun: e.kind, time: e.t, t: h.t != null && nx.t != null ? h.t + (nx.t - h.t) * f : h.t });
+        }
+      }
+    });
+    const temps = items.map(it => (it.sun ? it.t : it.h.t));
+    const v = nums(temps), lo = Math.min(...v), hi = Math.max(...v), CH = 30;
+    const y = t => 5 + (CH - 10) * (hi === lo ? 0.5 : (hi - t) / (hi - lo));
+    let path = '', dots = '';
+    temps.forEach((t, i) => {
+      if (t == null) return;
+      const x = i * STEP + 32;
+      path += (path ? 'L' : 'M') + x + ' ' + y(t).toFixed(1);
+      dots += `<circle cx="${x}" cy="${y(t).toFixed(1)}" r="${items[i].sun ? 3.2 : 2.4}" fill="${items[i].sun ? '#ffd23f' : 'var(--ink)'}"/>`;
+    });
+    const W = items.length * STEP - 4;
+    $('#hours').innerHTML = `<div class="hours-track" style="width:${W}px">
+      <svg class="hcurve" width="${W}" height="${CH}" viewBox="0 0 ${W} ${CH}" aria-hidden="true"><path d="${path}" fill="none" stroke="var(--ink)" stroke-opacity=".55" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>${dots}</svg>
+      ${items.map(it => it.sun ? `
+        <div class="hr sunev">
+          <div class="hr-time">${hh(it.time)}</div>${sunIcon(it.sun)}<div class="hr-c"></div>
+          <div class="hr-t sm">${it.sun === 'rise' ? 'Gün doğumu' : 'Gün batımı'}</div><div class="hr-r"></div>
+        </div>` : `
+        <div class="hr${it.k === 0 ? ' first' : ''}">
+          <div class="hr-time">${it.k === 0 ? 'Şimdi' : hh(it.h.time) === '00:00' ? esc(shortDay(it.h.time.slice(0, 10))) : hh(it.h.time)}</div>
+          ${icon(it.h.cat, it.h.isDay)}<div class="hr-c"></div>
+          <div class="hr-t">${r0(it.h.t)}°</div>
+          <div class="hr-r">${it.h.rainN ? DROP + it.h.rainN + '/' + it.h.n : ''}</div>
+        </div>`).join('')}
+    </div>`;
+    const sp = $('#hours .hr-c');
+    if (sp) $('#hours .hcurve').style.top = sp.offsetTop + 'px';
+  }
+
+  /* ---------- 14 gün (+ dün) ---------- */
+  let showAllDays = false;
+  function renderDays() {
+    const { days, ms } = S.c;
+    const ed = S.data.ext && S.data.ext.daily;
+    let yd = null;
+    if (ed && ed.time && ed.time[0] < days[0].date && ed.temperature_2m_max) {
+      yd = { tx: ed.temperature_2m_max[0], tn: ed.temperature_2m_min[0], cat: cat(ed.weather_code && ed.weather_code[0]) || 'cloudy' };
+    }
+    const shown = showAllDays ? days : days.slice(0, 7);
+    const all = nums([...shown.flatMap(d => [d.tnLo, d.txHi]), yd && yd.tn, yd && yd.tx]);
+    const lo = Math.min(...all), hi = Math.max(...all);
+    const pct = t => (((t - lo) / Math.max(1, hi - lo)) * 100).toFixed(1);
+    const bar = (a, b, cls) => (a != null && b != null ? `<span class="${cls}" style="left:${pct(a)}%;right:${(100 - pct(b)).toFixed(1)}%"></span>` : '');
+    const past = yd ? `<li><div class="day day-past" aria-label="Dün">
+        <span class="day-name">Dün</span>${icon(yd.cat, true)}<span class="day-rain"></span>
+        <span class="range"><span class="lo">${r0(yd.tn)}°</span><span class="track">${bar(yd.tn, yd.tx, 'core past')}</span><span>${r0(yd.tx)}°</span></span><span></span>
+      </div></li>` : '';
+    $('#days').innerHTML = past + shown.map((d, i) => `
+      <li><button class="day" data-i="${i}" aria-pressed="${i === S.sel}">
+        <span class="day-name"><span class="l">${esc(dayName(d.date, i))}</span><span class="s">${esc(i < 2 ? dayName(d.date, i) : shortDay(d.date))}</span></span>
+        ${icon(d.cat, true)}
+        <span class="day-rain">${d.rainN ? DROP + d.rainN + '/' + d.n : d.n && d.n < ms.length ? `<span class="mcount">${d.n} model</span>` : ''}</span>
+        <span class="range">
+          <span class="lo">${r0(d.tn)}°</span>
+          <span class="track">${bar(d.tnLo, d.txHi, 'spread')}${bar(d.tn, d.tx, 'core')}</span>
+          <span>${r0(d.tx)}°</span>
+        </span>
+        <span class="dot lvl-${d.lvl}" title="${LVL_TEXT[d.lvl]}"></span>
+      </button></li>`).join('');
+    const mb = $('#moreDays');
+    mb.hidden = days.length <= 7;
+    mb.textContent = showAllDays ? 'Daha az göster' : `${days.length - 7} gün daha göster`;
+    mb.setAttribute('aria-expanded', String(showAllDays));
+    const note = $('#horizonNote');
+    const minN = Math.min(...days.map(d => d.n).filter(n => n > 0));
+    note.hidden = !showAllDays || minN >= ms.length;
+    note.textContent = `Modellerin bazıları 4 ile 7 gün ileriyi görüyor. İleriki günlerde ${minN} modele kadar düşüyor, güven de buna göre azalıyor.`;
+  }
+
+  /* ---------- Detay kartları ---------- */
+  const fmtDur = m => `${Math.floor(m / 60)} sa ${Math.round(m % 60)} dk`;
+  const tile = (title, body, wide) => `<article class="tile${wide ? ' wide' : ''}"><h3 class="tile-h">${title}</h3>${body}</article>`;
+  const gbar = (p, cls) => `<div class="gbar ${cls}"><span class="mk" style="left:${Math.max(0, Math.min(100, p)).toFixed(1)}%"></span></div>`;
+  function face(level) {
+    const col = level === 'İyi' ? 'var(--good)' : level === 'Orta' ? 'var(--mid)' : 'var(--bad)';
+    const mouth = level === 'İyi' ? 'M12 21q6 5 12 0' : level === 'Orta' ? 'M12.5 22h11' : 'M12 24q6-5 12 0';
+    return `<svg viewBox="0 0 36 36" width="34" height="34" aria-hidden="true"><circle cx="18" cy="18" r="15" fill="${col}"/><circle cx="13" cy="14.5" r="1.8" fill="#1b2a38"/><circle cx="23" cy="14.5" r="1.8" fill="#1b2a38"/><path d="${mouth}" fill="none" stroke="#1b2a38" stroke-width="2" stroke-linecap="round"/></svg>`;
+  }
+  function leaf(on) {
+    return `<svg viewBox="0 0 48 48" width="40" height="40" aria-hidden="true"><path d="M10 38C10 20 22 9 40 8c0 18-11 30-29 30z" fill="currentColor" opacity="${on ? '.9' : '.28'}"/><path d="M12 36L30 18" stroke="var(--sky1)" stroke-width="2.4" stroke-linecap="round" opacity=".6"/></svg>`;
+  }
+  function compass(dir, speed) {
+    let ticks = '';
+    for (let k = 0; k < 36; k++) {
+      const a = k * 10 * RAD, r1 = k % 9 === 0 ? 41 : 44;
+      ticks += `<line x1="${(60 + Math.sin(a) * r1).toFixed(1)}" y1="${(60 - Math.cos(a) * r1).toFixed(1)}" x2="${(60 + Math.sin(a) * 48).toFixed(1)}" y2="${(60 - Math.cos(a) * 48).toFixed(1)}"/>`;
+    }
+    const L = (t, x, y) => `<text x="${x}" y="${y}" text-anchor="middle" dominant-baseline="central" font-size="11" font-weight="600" fill="currentColor">${t}</text>`;
+    return `<svg class="compass" viewBox="0 0 120 120" aria-hidden="true">
+      <g stroke="currentColor" stroke-opacity=".45" stroke-width="1.4">${ticks}</g>
+      ${L('K', 60, 30)}${L('D', 90, 60)}${L('G', 60, 90)}${L('B', 30, 60)}
+      ${dir != null ? `<g transform="rotate(${(dir + 180) % 360} 60 60)"><line x1="60" y1="104" x2="60" y2="22" stroke="var(--accent)" stroke-width="3" stroke-linecap="round"/><path d="M60 12l7 13h-14z" fill="var(--accent)"/><circle cx="60" cy="104" r="4" fill="none" stroke="var(--accent)" stroke-width="2.4"/></g>` : ''}
+      <circle cx="60" cy="60" r="21" fill="var(--sky1)" stroke="currentColor" stroke-opacity=".25"/>
+      <text x="60" y="57" text-anchor="middle" font-size="16" font-weight="600" fill="currentColor">${r0(speed)}</text>
+      <text x="60" y="71" text-anchor="middle" font-size="9" fill="currentColor" opacity=".75">km/sa</text></svg>`;
+  }
+  function gauge(v) {
+    const p = Math.max(0, Math.min(1, (v - 970) / 80)), a0 = 150, a1 = 390, r = 46;
+    const pt = a => [60 + r * Math.cos(a * RAD), 60 + r * Math.sin(a * RAD)];
+    const [sx, sy] = pt(a0), [ex, ey] = pt(a1), [mx, my] = pt(a0 + 240 * p);
+    const big = 240 * p > 180 ? 1 : 0;
+    return `<svg class="gauge" viewBox="0 0 120 112" aria-hidden="true">
+      <path d="M${sx.toFixed(1)} ${sy.toFixed(1)}A${r} ${r} 0 1 1 ${ex.toFixed(1)} ${ey.toFixed(1)}" fill="none" stroke="currentColor" stroke-opacity=".2" stroke-width="9" stroke-linecap="round"/>
+      ${p > 0.01 ? `<path d="M${sx.toFixed(1)} ${sy.toFixed(1)}A${r} ${r} 0 ${big} 1 ${mx.toFixed(1)} ${my.toFixed(1)}" fill="none" stroke="var(--accent)" stroke-width="9" stroke-linecap="round"/>` : ''}
+      <circle cx="${mx.toFixed(1)}" cy="${my.toFixed(1)}" r="6.5" fill="#fff" stroke="var(--accent)" stroke-width="3"/>
+      <text x="60" y="60" text-anchor="middle" font-size="18" font-weight="600" fill="currentColor">${v.toFixed(0)}</text>
+      <text x="60" y="76" text-anchor="middle" font-size="10" fill="currentColor" opacity=".75">hPa</text>
+      <text x="22" y="106" text-anchor="middle" font-size="9" fill="currentColor" opacity=".6">970</text><text x="98" y="106" text-anchor="middle" font-size="9" fill="currentColor" opacity=".6">1050</text></svg>`;
+  }
+  function moonDisc(ph) {
+    const cx = 45, cy = 45, r = 36, k = ph.illum;
+    let lit = '';
+    if (k > 0.985) lit = `<circle cx="${cx}" cy="${cy}" r="${r}" fill="#f4f0dc"/>`;
+    else if (k > 0.015) {
+      const rx = (r * Math.abs(2 * k - 1)).toFixed(2);
+      lit = ph.waxing
+        ? `<path d="M${cx} ${cy - r}A${r} ${r} 0 0 1 ${cx} ${cy + r}A${rx} ${r} 0 0 ${k > 0.5 ? 1 : 0} ${cx} ${cy - r}z" fill="#f4f0dc"/>`
+        : `<path d="M${cx} ${cy - r}A${r} ${r} 0 0 0 ${cx} ${cy + r}A${rx} ${r} 0 0 ${k > 0.5 ? 0 : 1} ${cx} ${cy - r}z" fill="#f4f0dc"/>`;
+    }
+    return `<svg class="moon" viewBox="0 0 90 90" aria-hidden="true"><circle cx="${cx}" cy="${cy}" r="${r}" fill="#39425a"/>${lit}
+      <circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="#fff" stroke-opacity=".25"/>
+      <g fill="#000" opacity=".08"><circle cx="34" cy="34" r="7"/><circle cx="56" cy="52" r="9"/><circle cx="40" cy="60" r="4"/></g></svg>`;
+  }
+  function renderTiles() {
+    const D = S.data, c = S.c, cur = D.bm.current || {}, ext = D.ext || {}, ec = ext.current || {}, aq = (D.aq && D.aq.current) || {};
+    const nowT = cur.time || c.hours[c.start].time, today = nowT.slice(0, 10), nowM = tMin(nowT);
+    const out = [];
+
+    // Koşu
+    const next = c.hours.slice(c.start, c.start + 4);
+    const sc = next.map(h => runScore(h.t, h.share, h.w, aq.european_aqi));
+    if (sc[0] != null) {
+      out.push(tile('Koşu', `<div class="run"><div><p class="big-txt">Şu anda koşu için hava <b>${runInfo(sc[0]).toLocaleLowerCase('tr-TR')}</b></p>
+        <p class="muted small">Sıcaklık, yağış, rüzgâr ve hava kalitesine göre</p></div>
+        <div class="run-hours">${next.slice(1).map((h, i) => `<div>${face(runInfo(sc[i + 1]))}<span class="small muted">${hh(h.time)}</span></div>`).join('')}</div></div>`, true));
+    }
+    // Hava kalitesi
+    if (aq.european_aqi != null) {
+      out.push(tile('Hava kalitesi', `<p class="big">${aqiInfo(aq.european_aqi)} <span class="unit">(${r0(aq.european_aqi)})</span></p>${gbar(aq.european_aqi, 'aqi')}
+        <p class="small muted">PM2.5 ${r0(aq.pm2_5)} · PM10 ${r0(aq.pm10)} µg/m³</p>`));
+    }
+    // UV
+    if (ec.uv_index != null) {
+      const eh = ext.hourly || {};
+      const rest = nums((eh.time || []).map((t, i) => (t.slice(0, 10) === today && t >= nowT.slice(0, 13) ? eh.uv_index[i] : null)));
+      const restMax = rest.length ? Math.max(...rest) : ec.uv_index;
+      const lvl = uvInfo(ec.uv_index);
+      out.push(tile('UV endeksi', `<p class="big">${r0(ec.uv_index)} <span class="unit">${lvl}</span></p>${gbar(ec.uv_index / 11 * 100, 'uv')}
+        <p class="small muted">Günün kalanında ${uvInfo(restMax).toLocaleLowerCase('tr-TR')}. ${restMax >= 6 ? 'Gölgede kal, şapka ve krem kullan.' : restMax >= 3 ? 'Öğle saatlerinde güneş kremi iyi olur.' : 'Korunma gerekmez.'}</p>`));
+    }
+    // Polen
+    const pk = ['alder_pollen', 'birch_pollen', 'olive_pollen', 'grass_pollen', 'mugwort_pollen', 'ragweed_pollen'];
+    if (pk.some(k => k in aq)) {
+      const mx = keys => { const v = nums(keys.map(k => aq[k])); return v.length ? Math.max(...v) : null; };
+      const items = [['Ağaç', mx(['alder_pollen', 'birch_pollen', 'olive_pollen'])], ['Çimen', mx(['grass_pollen'])], ['Yabani ot', mx(['mugwort_pollen', 'ragweed_pollen'])]];
+      out.push(tile('Polen', `<div class="pollen">${items.map(([n, v]) => `<div>${leaf(v >= 1)}<b>${pollenInfo(v)}</b><span class="small muted">${n}</span></div>`).join('')}</div>`, true));
+    }
+    // Nem
+    if (cur.relative_humidity_2m != null) {
+      const eh = ext.hourly || {};
+      const yT = (eh.time || []).find(t => t.slice(0, 10) < today && t.slice(11, 13) === nowT.slice(11, 13));
+      const yv = yT != null ? eh.relative_humidity_2m[eh.time.indexOf(yT)] : null;
+      const cmp = yv == null ? '' : cur.relative_humidity_2m - yv > 5 ? 'Dünden daha yüksek' : yv - cur.relative_humidity_2m > 5 ? 'Dünden daha düşük' : 'Dünle aynı seviyede';
+      out.push(tile('Nem', `<p class="big">%${r0(cur.relative_humidity_2m)}</p><div class="hbar"><span style="width:${cur.relative_humidity_2m}%"></span></div>
+        <p class="small muted">${cmp}${yv != null ? ` (dün bu saatte %${r0(yv)})` : ''}</p>`));
+    }
+    // Çiy noktası
+    if (ec.dew_point_2m != null) {
+      out.push(tile('Çiy noktası', `<p class="big">${r0(ec.dew_point_2m)}°</p><p class="small">${dewInfo(ec.dew_point_2m)}</p>
+        <p class="small muted">Hava bu sıcaklığa inerse çiy ya da sis oluşur.</p>`));
+    }
+    // Rüzgâr
+    if (cur.wind_speed_10m != null) {
+      const dir = ec.wind_direction_10m;
+      out.push(tile('Rüzgâr', `${compass(dir, cur.wind_speed_10m)}<p class="small">${windInfo(cur.wind_speed_10m)}${dir != null ? ', ' + windFrom(dir).toLocaleLowerCase('tr-TR') + ' esiyor' : ''}</p>
+        ${ec.wind_gusts_10m != null ? `<p class="small muted">Hamleler ${r0(ec.wind_gusts_10m)} km/sa</p>` : ''}`));
+    }
+    // Basınç
+    if (ec.pressure_msl != null) {
+      const eh = ext.hourly || {}, i0 = (eh.time || []).indexOf(nowT.slice(0, 13) + ':00');
+      const dp = i0 >= 3 && eh.pressure_msl ? eh.pressure_msl[i0] - eh.pressure_msl[i0 - 3] : null;
+      const tr = dp == null ? '' : Math.abs(dp) < 0.7 ? 'Sabit seyrediyor' : `${Math.abs(dp) >= 2 ? 'Hızla ' : ''}${dp > 0 ? 'yükseliyor' : 'düşüyor'}`;
+      out.push(tile('Basınç', `${gauge(ec.pressure_msl)}<p class="small">${tr ? tr.charAt(0).toLocaleUpperCase('tr-TR') + tr.slice(1) : ''}${dp != null ? ` (3 saatte ${dp > 0 ? '+' : ''}${dp.toFixed(1)})` : ''}</p>
+        <p class="small muted">${dp != null && dp <= -2 ? 'Hızlı düşüş kötüleşen havaya işaret edebilir.' : dp != null && dp >= 2 ? 'Yükselen basınç genelde açılan hava demek.' : ''}</p>`));
+    }
+    // Görünürlük
+    if (ec.visibility != null) {
+      const km = ec.visibility / 1000;
+      out.push(tile('Görünürlük', `<p class="big">${km >= 10 ? km.toFixed(0) : km.toFixed(1)} <span class="unit">km</span></p><p class="small">${visInfo(km)}</p>`));
+    }
+    // Hissedilen
+    if (cur.apparent_temperature != null && cur.temperature_2m != null) {
+      const df = cur.apparent_temperature - cur.temperature_2m;
+      const why = df <= -2 ? (cur.wind_speed_10m > 10 ? 'Rüzgâr yüzünden olduğundan daha soğuk hissettiriyor.' : 'Olduğundan daha soğuk hissettiriyor.')
+        : df >= 2 ? (cur.relative_humidity_2m > 60 ? 'Nem yüzünden olduğundan daha sıcak hissettiriyor.' : 'Güneş ve durgun hava yüzünden daha sıcak hissettiriyor.')
+        : 'Gerçek sıcaklığa yakın hissettiriyor.';
+      out.push(tile('Hissedilen', `<p class="big">${r0(cur.apparent_temperature)}°</p><p class="small">${why}</p>
+        <p class="small muted">Gerçek sıcaklık ${r0(cur.temperature_2m)}°</p>`));
+    }
+    // Güneş
+    const bd = D.bm.daily || {}, di = (bd.time || []).indexOf(today);
+    if (di >= 0 && bd.sunrise && bd.sunset) {
+      const rise = bd.sunrise[di], set = bd.sunset[di], rM = tMin(rise), sM = tMin(set);
+      const f = (nowM - rM) / (sM - rM), up = f >= 0 && f <= 1;
+      const th = Math.PI * (1 - Math.max(0, Math.min(1, f)));
+      const sx = 150 + 130 * Math.cos(th), sy = 92 - 72 * Math.sin(th);
+      let msg;
+      if (f < 0) msg = `Gün doğumuna ${fmtDur(rM - nowM)} var`;
+      else if (up) msg = `Gün batımına ${fmtDur(sM - nowM)} var`;
+      else { const nr = bd.sunrise[di + 1]; msg = `Güneş battı${nr ? `. Yarın ${hh(nr)}'de doğacak` : ''}`; }
+      out.push(tile('Güneş', `<p class="big-txt">${msg}</p>
+        <svg class="sunarc" viewBox="0 0 300 112" aria-hidden="true">
+          <line x1="8" y1="92" x2="292" y2="92" stroke="currentColor" stroke-opacity=".35" stroke-width="1.5"/>
+          <path d="M20 92A130 72 0 0 1 280 92" fill="none" stroke="currentColor" stroke-opacity=".35" stroke-width="2" stroke-dasharray="4 5"/>
+          ${up ? `<path d="M20 92A130 72 0 0 1 ${sx.toFixed(1)} ${sy.toFixed(1)}" fill="none" stroke="#ffd23f" stroke-width="3" stroke-linecap="round"/>` : ''}
+          <circle cx="${sx.toFixed(1)}" cy="${(up ? sy : 92).toFixed(1)}" r="9" fill="#ffd23f" ${up ? '' : 'opacity=".45"'}/>
+        </svg>
+        <div class="sun-times"><span><b>${hh(rise)}</b><span class="small muted">Gün doğumu</span></span>
+          <span class="small muted">Gün uzunluğu ${fmtDur(sM - rM)}</span>
+          <span><b>${hh(set)}</b><span class="small muted">Gün batımı</span></span></div>`, true));
+    }
+    // Ay
+    {
+      const ph = moonPhase(Date.now());
+      const off = D.bm.utc_offset_seconds || 0;
+      const mt = moonTimes(today, off, S.loc.lat, S.loc.lon);
+      const SYN = 29.530588853;
+      const toFull = ((0.5 - ph.frac + 1) % 1) * SYN, toNew = ((1 - ph.frac) % 1) * SYN;
+      const nxt = ph.name === 'Dolunay' ? `Yeni aya ${Math.round(toNew)} gün` : ph.name === 'Yeni Ay' ? `Dolunaya ${Math.round(toFull)} gün`
+        : toFull < 1.5 ? 'Dolunay yarın' : `Dolunaya ${Math.round(toFull)} gün`;
+      out.push(tile('Ay', `<div class="moonrow">${moonDisc(ph)}
+        <div><p class="big-txt"><b>${ph.name}</b></p><p class="small muted">%${Math.round(ph.illum * 100)} aydınlık · ${nxt}</p>
+          <div class="moon-times"><span><span class="small muted">Ay doğuşu</span><b>${mt.rise || '–'}</b></span><span><span class="small muted">Ay batışı</span><b>${mt.set || '–'}</b></span></div></div></div>`, true));
+    }
+    $('#tiles').innerHTML = out.join('');
   }
 
   /* ---------- Doğruluk karnesi ---------- */
@@ -1027,11 +1331,12 @@ function init() {
     gpsLocate().then(l => { if (l) setLoc(l); else toast('Konum alınamadı. İzin verdiğinden emin ol ya da şehir ara.'); });
   });
   $('#days').addEventListener('click', e => {
-    const b = e.target.closest('.day'); if (!b || !S.c) return;
+    const b = e.target.closest('.day'); if (!b || !S.c || b.classList.contains('day-past')) return;
     S.sel = +b.dataset.i;
     renderTable();
     openDrawer('models');
   });
+  $('#moreDays').addEventListener('click', () => { showAllDays = !showAllDays; renderDays(); });
   $('#themeChips').innerHTML = THEMES.map(([k, l]) => `<button class="chip" type="button" data-t="${k}" aria-pressed="${k === 'auto'}">${l}</button>`).join('');
   $('#themeChips').addEventListener('click', e => {
     const b = e.target.closest('.chip'); if (!b) return;
