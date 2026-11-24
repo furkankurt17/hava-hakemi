@@ -91,7 +91,17 @@ function column(m, part, key, refTimes) {
 }
 
 /* ================= Ortak görüş hesabı ================= */
-function compute(data) {
+// weights: { modelId: ağırlık } verilirse sıcaklık ortak görüşü ağırlıklı ortalama olur, yoksa medyan
+function consensusT(ms, get, weights) {
+  const pairs = ms.map(m => [m.id, get(m)]).filter(([, v]) => typeof v === 'number' && isFinite(v));
+  if (!pairs.length) return null;
+  if (!weights) return median(pairs.map(p => p[1]));
+  const ws = Object.values(weights), avg = ws.reduce((a, b) => a + b, 0) / ws.length;
+  let sw = 0, sv = 0;
+  for (const [id, v] of pairs) { const w = weights[id] ?? avg; sw += w; sv += w * v; }
+  return sv / sw;
+}
+function compute(data, weights) {
   const H = data.bm.hourly.time, D = data.bm.daily.time;
   const ms = data.models.map(m => ({
     id: m.id, name: m.name, org: m.org, color: m.color,
@@ -108,7 +118,7 @@ function compute(data) {
     const rainN = ps.filter(v => v >= RAIN_H).length;
     const share = ps.length ? rainN / ps.length : 0;
     return {
-      time, t: median(ts), tLo: ts.length ? Math.min(...ts) : null, tHi: ts.length ? Math.max(...ts) : null,
+      time, t: consensusT(ms, m => m.h.t[i], weights), tLo: ts.length ? Math.min(...ts) : null, tHi: ts.length ? Math.max(...ts) : null,
       n: ps.length, rainN, share, p: median(ps),
       cat: consensusCat(ms.map(m => cat(m.h.c[i])), share),
       isDay: isDayArr[i] !== 0,
@@ -122,7 +132,7 @@ function compute(data) {
     const spread = trimmedSpread(tx);
     const lvl = ps.length < 2 ? 0 : Math.min(tempLvl(spread), rainLvl(share, ps.length));
     return {
-      date, tx: median(tx), tn: median(tn),
+      date, tx: consensusT(ms, m => m.d.tx[i], weights), tn: consensusT(ms, m => m.d.tn[i], weights),
       txLo: tx.length ? Math.min(...tx) : null, txHi: tx.length ? Math.max(...tx) : null,
       tnLo: tn.length ? Math.min(...tn) : null,
       p: median(ps), w: median(ws), n: ps.length, rainN, share, spread, lvl,
@@ -165,9 +175,35 @@ function verdict(c) {
   return { text, sub, lvl };
 }
 
+/* ================= Doğruluk karnesi ================= */
+const KARNE_MIN_DAYS = 5;     // ağırlıklandırma için gereken gün sayısı
+const KARNE_MAX_KM = 150;     // karnenin geçerli sayılacağı en uzak mesafe
+function distKm(a, b) {
+  const R = 6371, rad = Math.PI / 180;
+  const dLa = (b.lat - a.lat) * rad, dLo = (b.lon - a.lon) * rad;
+  const h = Math.sin(dLa / 2) ** 2 + Math.cos(a.lat * rad) * Math.cos(b.lat * rad) * Math.sin(dLo / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(h));
+}
+function nearestCity(cities, loc) {
+  let best = null;
+  for (const c of cities || []) { const km = distKm(loc, c); if (!best || km < best.km) best = { city: c, km }; }
+  return best;
+}
+// Yakında, yeterli günü olan bir karne varsa: ağırlık = 1 / hata²
+function weightsFor(card, loc) {
+  if (!card || !loc) return null;
+  const n = nearestCity(card.cities, loc);
+  if (!n || n.km > KARNE_MAX_KM || n.city.days < KARNE_MIN_DAYS) return null;
+  const ms = (n.city.models || []).filter(m => m.id !== 'ortak' && m.mae != null);
+  if (ms.length < 3) return null;
+  const w = {};
+  for (const m of ms) w[m.id] = 1 / Math.max(0.5, m.mae) ** 2;
+  return w;
+}
+
 /* ================= Node testleri için dışa aç ================= */
 if (typeof document === 'undefined') {
-  if (typeof module !== 'undefined') module.exports = { compute, verdict, cat, majority, consensusCat, median, column, MODELS };
+  if (typeof module !== 'undefined') module.exports = { compute, consensusT, weightsFor, nearestCity, verdict, cat, majority, consensusCat, median, column, MODELS };
 } else {
   init();
 }
@@ -180,7 +216,7 @@ function init() {
     get(k) { try { return JSON.parse(localStorage.getItem(k)); } catch (e) { return null; } },
     set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) { /* depolama yoksa sorun değil */ } },
   };
-  const S = { loc: store.get('hh.loc') || DEFAULT_LOC, data: null, c: null, sel: 0, theme: 'auto', loading: false };
+  const S = { loc: store.get('hh.loc') || DEFAULT_LOC, data: null, c: null, sel: 0, theme: 'auto', loading: false, card: null };
 
   /* ---------- İkonlar ---------- */
   const CLOUD = 'M10 27h16a6 6 0 0 0 .7-11.96A8.5 8.5 0 0 0 10.4 13 7 7 0 0 0 10 27z';
@@ -273,7 +309,8 @@ function init() {
 
   /* ---------- Çizim ---------- */
   function render() {
-    S.c = compute(S.data);
+    S.w = weightsFor(S.card, S.loc);
+    S.c = compute(S.data, S.w);
     const { hours, days, start, ms } = S.c;
     const cur = S.data.bm.current || {};
     $('#placeName').textContent = S.loc.name;
@@ -327,6 +364,7 @@ function init() {
 
     renderTable();
     drawChart();
+    renderKarne();
     applyTheme();
     const t = new Date(S.data.at);
     const age = Math.round((Date.now() - S.data.at) / 60000);
@@ -352,6 +390,50 @@ function init() {
       <tbody>${ms.map(row).join('')}
       <tr class="cons"><td>Ortak görüş</td><td>${icon(d.cat, true)}</td><td>${r0(d.tx)}°</td><td>${r0(d.tn)}°</td>
       <td>${d.p == null ? "–" : d.p.toFixed(1)}<span class="u"> mm</span></td><td class="cw">${r0(d.w)} km/sa</td></tr></tbody>`;
+  }
+
+  /* ---------- Doğruluk karnesi ---------- */
+  const MODEL_BY_ID = Object.fromEntries(MODELS.map(m => [m.id, m]));
+  async function loadCard() {
+    try {
+      const card = await getJSON('data/scorecard.json?v=' + Math.floor(Date.now() / 36e5), 10000);
+      if (card && Array.isArray(card.cities)) { S.card = card; store.set('hh.card', card); }
+    } catch (e) { /* çevrimdışı ya da dosya yok: önbellekteki karne kullanılır */ }
+    if (S.data) render(); else renderKarne();
+  }
+  function renderKarne() {
+    const el = $('#karne'), where = $('#karneWhere');
+    const card = S.card;
+    const near = card && nearestCity(card.cities, S.loc);
+    if (!near) {
+      where.textContent = '';
+      el.innerHTML = '<p>Her gün modellerin tahminleri kaydedilip ertesi gün havalimanı ölçümleriyle karşılaştırılıyor.</p><p class="muted small">Karne verisi şu an yüklenemedi.</p>';
+      return;
+    }
+    const c = near.city, km = Math.round(near.km);
+    where.textContent = `${c.name} · ${c.stationName}`;
+    const farNote = km > KARNE_MAX_KM
+      ? `<p class="muted small">Bulunduğun yere en yakın ölçüm noktası ${esc(c.name)} (${km} km). Bu bölge için ağırlıklandırma yapılmıyor.</p>` : '';
+    if (!c.days) {
+      el.innerHTML = `<p>Her gün 8 modelin tahmini kaydediliyor ve ertesi gün ${esc(c.stationName)} ölçümleriyle karşılaştırılıyor.</p>
+        <p class="muted small">Ölçüm birikiyor. İlk sonuçlar yarın sabah burada görünecek.</p>${farNote}`;
+      return;
+    }
+    const worst = Math.max(...c.models.map(m => m.mae), 1);
+    const rows = c.models.map((m, k) => {
+      const meta = m.id === 'ortak' ? { name: 'Ortak görüş (medyan)', org: 'Tüm modeller', color: 'var(--ink)' } : (MODEL_BY_ID[m.id] || { name: m.id, org: '', color: '#ccc' });
+      return `<tr${m.id === 'ortak' ? ' class="cons"' : ''}>
+        <td><span class="mname"><b class="rank">${k + 1}</b><i style="background:${meta.color}"></i><span>${esc(meta.name)}<small>${esc(meta.org)}</small></span></span></td>
+        <td><span class="err"><span class="errbar"><span style="width:${(100 * m.mae / worst).toFixed(0)}%"></span></span>±${m.mae.toFixed(1)}°</span></td>
+        <td>${m.rainHit == null ? '–' : '%' + m.rainHit}</td></tr>`;
+    }).join('');
+    const leadTxt = c.lead === 'lead1' ? '1 gün önceden yapılan tahminler' : 'aynı gün yapılan tahminler';
+    const wNote = S.w
+      ? `<p class="small"><b>Ağırlıklı ortak görüş açık:</b> sıcaklıkta isabetli modeller daha çok söz sahibi.</p>`
+      : km <= KARNE_MAX_KM ? `<p class="muted small">${KARNE_MIN_DAYS} gün dolunca ortak görüş isabetli modellere daha çok ağırlık verecek (${Math.min(c.days, KARNE_MIN_DAYS)}/${KARNE_MIN_DAYS}).</p>` : '';
+    el.innerHTML = `<p class="muted small">Son ${c.days} gün, ${leadTxt}. Sıcaklık hatası: tahmin ile ölçüm arasındaki ortalama fark (küçük olan iyi). Yağış isabeti: "yağacak mı" sorusunu doğru bilen günlerin oranı.</p>
+      <div class="scroll"><table class="mtable karne"><thead><tr><th>Model</th><th>Sıcaklık hatası</th><th>Yağış isabeti</th></tr></thead><tbody>${rows}</tbody></table></div>
+      ${wNote}${farNote}`;
   }
 
   /* ---------- 48 saatlik grafik ---------- */
@@ -617,11 +699,13 @@ function init() {
   /* ---------- Başlangıç ---------- */
   $('#placeName').textContent = S.loc.name;
   applyTheme();
+  S.card = store.get('hh.card');
   const cached = store.get('hh.cache');
   if (cached && cached.loc && cached.loc.lat === S.loc.lat && cached.loc.lon === S.loc.lon && cached.bm && cached.models) {
     S.data = cached;
     try { render(); } catch (e) { console.error(e); S.data = null; }
   }
   refresh(!!S.data);
+  loadCard();
 }
 }

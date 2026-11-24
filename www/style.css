@@ -212,3 +212,12 @@ footer{padding:6px 4px}
 @media (prefers-reduced-motion:reduce){
   .icon-btn.spin svg{animation:none}
 }
+
+/* Doğruluk karnesi */
+.karne td:nth-child(2){min-width:9em}
+.rank{font-weight:600;color:var(--muted);width:1.2em;display:inline-block;text-align:right;font-size:13px}
+.err{display:inline-flex;align-items:center;gap:8px;justify-content:flex-end}
+.errbar{width:70px;height:6px;border-radius:99px;background:rgba(255,255,255,.16);overflow:hidden;display:inline-block}
+.errbar span{display:block;height:100%;border-radius:99px;background:var(--accent)}
+body[data-sky=fog][data-night="0"] .errbar,body[data-sky=snow][data-night="0"] .errbar{background:rgba(27,42,56,.1)}
+@media (max-width:480px){.errbar{width:40px}}

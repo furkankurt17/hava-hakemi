@@ -1,0 +1,44 @@
+name: Doğruluk karnesi
+
+# Her gün 03:47 (Türkiye) çalışır: dünü puanlar, bugün ve yarının tahminlerini kaydeder.
+on:
+  schedule:
+    - cron: '47 0 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: karne
+  cancel-in-progress: false
+
+jobs:
+  karne:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+
+      - name: Ölç, puanla, kaydet
+        run: node scripts/karne.mjs
+
+      - name: Veriyi depoya yaz
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add www/data
+          if git diff --cached --quiet; then echo "Değişiklik yok"; exit 0; fi
+          git commit -m "Karne: $(date -u +%F)"
+          git pull --rebase
+          git push
+
+      # GITHUB_TOKEN ile yapılan push başka iş akışını tetiklemez; siteyi elle yeniden yayınlatıyoruz
+      - name: Siteyi yeniden yayınla
+        run: gh workflow run pages.yml --ref main
+        env:
+          GH_TOKEN: ${{ github.token }}
